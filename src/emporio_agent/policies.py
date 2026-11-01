@@ -136,8 +136,9 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
         text = _normalized(section.text)
         found = False
         for pattern in (
-            r"\bpix\b[^%]{0,100}?([+-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s+de\s+desconto",
-            r"desconto\s+de\s+pix\s*\(\s*([+-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s*\)",
+            r"\bpix\b\s*:?\s*(?:pagamento\s+a\s+vista\s+)?"
+            r"([+−-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s+de\s+desconto",
+            r"desconto\s+de\s+pix\s*\(\s*([+−-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s*\)",
         ):
             for match in re.finditer(pattern, text):
                 found = True

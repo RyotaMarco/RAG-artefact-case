@@ -15,7 +15,7 @@ def section(text: str, source: str = "policy.pdf") -> PolicySection:
     return PolicySection("Payments", text, (Citation(source, (3,), "Payments"),))
 
 
-@pytest.mark.parametrize("percentage", ["-5", "105", "50." + "0" * 150 + "1"])
+@pytest.mark.parametrize("percentage", ["-5", "−5", "105", "50." + "0" * 150 + "1"])
 def test_invalid_source_percentage_never_becomes_a_different_discount(percentage: str) -> None:
     """Keep invalid signs, ranges or unsupported precision from producing a usable quote."""
     rules = extract_rules((section(f"PIX {percentage}% de desconto."),))
@@ -30,6 +30,17 @@ def test_source_percentage_preserves_valid_decimal_digits() -> None:
     percentage = "7." + "1" * 45
     rules = extract_rules((section(f"PIX {percentage}% de desconto."),))
     assert rules.pix_rate == Decimal(percentage + "E-2")
+
+
+@pytest.mark.parametrize(
+    "text", ["PIX não oferece 5% de desconto.", "PIX sem desconto. Cartão: 5% de desconto."]
+)
+def test_unrecognized_payment_wording_does_not_borrow_a_nearby_percentage(text: str) -> None:
+    """Only supported affirmative PIX clauses may enable automatic discount calculations."""
+    rules = extract_rules((section(text),))
+    assert rules.pix_rate is None
+    with pytest.raises(PolicyUnavailableError):
+        rules.quote(Decimal("100.00"))
 
 
 def test_rates_and_thresholds_come_from_source_values() -> None:
