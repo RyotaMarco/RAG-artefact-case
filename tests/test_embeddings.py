@@ -2,12 +2,35 @@
 
 from pathlib import Path
 
+import httpx
 import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
 from emporio_agent.embeddings import EmbeddingConfig, HFEmbedder, ModelTokenizer
+
+
+@pytest.mark.parametrize("status, expected", [(401, "HF_TOKEN"), (402, "credits"), (429, "limit")])
+def test_provider_errors_are_actionable_without_exposing_response_secrets(
+    tmp_path: Path, status: int, expected: str
+) -> None:
+    """Report a provider failure category without displaying its raw response body."""
+
+    class RejectingClient(FakeClient):
+        def feature_extraction(
+            self, text: str | list[str], *, model: str, normalize: bool, truncate: bool
+        ) -> object:
+            """Fail only the controlled external provider boundary."""
+            response = httpx.Response(status, request=httpx.Request("POST", "https://example.test"))
+            raise httpx.HTTPStatusError(
+                "secret-provider-body", request=response.request, response=response
+            )
+
+    embedder = HFEmbedder(tmp_path / "vectors.sqlite3", client=RejectingClient())
+    with pytest.raises(ValueError, match=expected) as captured:
+        embedder.embed_query("payment methods")
+    assert "secret-provider-body" not in str(captured.value)
 
 
 class FakeClient:

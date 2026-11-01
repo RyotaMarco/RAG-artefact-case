@@ -10,6 +10,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Protocol
 
+import httpx
 import numpy as np
 from tokenizers import Tokenizer
 
@@ -189,9 +190,25 @@ class HFEmbedder:
             for offset in range(0, len(missing), 32):
                 batch_keys = missing[offset : offset + 32]
                 batch = [by_key[key] for key in batch_keys]
-                response = self._client.feature_extraction(
-                    batch, model=self.config.model, normalize=True, truncate=False
-                )
+                try:
+                    response = self._client.feature_extraction(
+                        batch, model=self.config.model, normalize=True, truncate=False
+                    )
+                except httpx.TimeoutException as error:
+                    raise ValueError(
+                        "The embedding provider timed out. Please retry later."
+                    ) from error
+                except httpx.HTTPStatusError as error:
+                    status = error.response.status_code
+                    reason = {
+                        401: "Check HF_TOKEN and inference permissions.",
+                        403: "Check HF_TOKEN and inference permissions.",
+                        402: "The embedding provider reports insufficient credits.",
+                        429: "The embedding provider request limit was reached. Retry later.",
+                    }.get(status, "Check the provider configuration and retry later.")
+                    raise ValueError(
+                        f"Embedding service rejected the request ({status}). {reason}"
+                    ) from error
                 array = np.asarray(response, dtype=np.float64)
                 if array.shape != (len(batch), self.config.dimensions):
                     raise ValueError("Embedding response does not match the requested batch.")
