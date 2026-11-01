@@ -148,3 +148,28 @@ def test_oversized_result_is_rejected() -> None:
     source = _source("large.csv", "category_id,name,description\n1,Guitars," + "x" * 40_000 + "\n")
     with pytest.raises(QueryError, match="too large"):
         QueryEngine(build_catalog((source,))).query("SELECT description FROM categories")
+
+
+def test_formatted_result_budget_includes_all_source_provenance() -> None:
+    """Many shards cannot bypass the result cap through added source metadata."""
+    sources = tuple(
+        _source(
+            f"{'x' * 380}/{index}.csv",
+            f"category_id,name,description\n{index + 1},Guitars,Description\n",
+        )
+        for index in range(90)
+    )
+    result = QueryEngine(build_catalog(sources)).query("SELECT COUNT(*) FROM categories")
+    assert result.rows == ((90,),)
+    with pytest.raises(QueryError, match="formatted result is too large"):
+        result.as_dict()
+
+
+def test_missing_private_tables_disable_verification_without_breaking_public_data() -> None:
+    """Partial source sets retain available capabilities and never fabricate an order scope."""
+    source = _source("categories.csv", "category_id,name,description\n1,Guitars,Description\n")
+    engine = QueryEngine(build_catalog((source,)))
+    assert engine.verify_order(1, "someone@example.com") is None
+    assert engine.query("SELECT COUNT(*) FROM categories").rows == ((1,),)
+    with pytest.raises(QueryError, match="unavailable table"):
+        engine.query("SELECT order_id FROM orders", verified_order_id=1)
