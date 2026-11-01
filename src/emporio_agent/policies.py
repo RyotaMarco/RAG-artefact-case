@@ -3,9 +3,10 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 from emporio_agent.documents import Citation, PolicySection
+from emporio_agent.money import canonical_rate
 
 
 class PolicyUnavailableError(ValueError):
@@ -135,16 +136,20 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
         text = _normalized(section.text)
         found = False
         for pattern in (
-            r"\bpix\b[^%]{0,100}?([0-9]+(?:[.,][0-9]+)?)\s*%\s+de\s+desconto",
-            r"desconto\s+de\s+pix\s*\(\s*([0-9]+(?:[.,][0-9]+)?)\s*%\s*\)",
+            r"\bpix\b\s*:?\s*(?:pagamento\s+a\s+vista\s+)?"
+            r"([+−-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s+de\s+desconto",
+            r"desconto\s+de\s+pix\s*\(\s*([+−-]?[0-9]+(?:[.,][0-9]+)?)\s*%\s*\)",
         ):
             for match in re.finditer(pattern, text):
-                rate = Decimal(match.group(1).replace(",", ".")) / 100
-                if not Decimal(0) <= rate <= Decimal(1):
-                    conflicts.append("PIX discount is outside the valid percentage range.")
-                else:
-                    rates.add(rate)
                 found = True
+                try:
+                    percentage = canonical_rate(match.group(1).replace(",", "."))
+                    with localcontext() as context:
+                        context.prec = 100
+                        rate = Decimal(percentage) / 100
+                    rates.add(rate)
+                except ValueError:
+                    conflicts.append("PIX discount is invalid or has unsupported precision.")
         if (
             "promocoes nao sao cumulativas" in text
             or "pix" in text
