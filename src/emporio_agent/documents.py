@@ -81,18 +81,30 @@ def _terms(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", normalized)
 
 
-def _extract(source: PDFSource) -> list[tuple[str, list[tuple[int, str]]]]:
-    reader = PdfReader(BytesIO(source.content))
-    if reader.is_encrypted:
-        raise ValueError(f"Encrypted PDF is unsupported: {source.relative_path}")
-    pages = [page.extract_text(extraction_mode="layout") for page in reader.pages]
-    visible_lines = [[line.strip() for line in page.splitlines() if line.strip()] for page in pages]
-    headers = Counter(lines[0] for lines in visible_lines if lines)
-    footers = Counter(lines[-1] for lines in visible_lines if lines)
+def _page_content(page: str, headers: Counter[str], footers: Counter[str]) -> list[str]:
+    lines = page.splitlines()
+    visible = [index for index, line in enumerate(lines) if line.strip()]
+    if not visible:
+        return []
+    first, last = visible[0], visible[-1]
+    content: list[str] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index == first and headers[stripped] > 1:
+            continue
+        if index == last and (
+            footers[stripped] > 1 or re.fullmatch(r"(?:Página|Page)\s+\d+", stripped)
+        ):
+            continue
+        content.append(line)
+    return content
+
+
+def _sections(pages: list[list[str]]) -> list[tuple[str, list[tuple[int, str]]]]:
     sections: list[tuple[str, list[tuple[int, str]]]] = []
     title = "Document overview"
     paragraphs: list[tuple[int, str]] = []
-    for number, page in enumerate(pages, start=1):
+    for number, lines in enumerate(pages, start=1):
         pending: list[str] = []
 
         def flush() -> None:
@@ -100,16 +112,8 @@ def _extract(source: PDFSource) -> list[tuple[str, list[tuple[int, str]]]]:
                 paragraphs.append((number, " ".join(pending)))
                 pending.clear()
 
-        nonempty_indices = [index for index, line in enumerate(page.splitlines()) if line.strip()]
-        for line_index, line in enumerate(page.splitlines()):
+        for line in lines:
             stripped = line.strip()
-            is_header = bool(nonempty_indices) and line_index == nonempty_indices[0]
-            is_footer = bool(nonempty_indices) and line_index == nonempty_indices[-1]
-            if (is_header and headers[stripped] > 1) or (
-                is_footer
-                and (footers[stripped] > 1 or re.fullmatch(r"(?:Página|Page)\s+\d+", stripped))
-            ):
-                continue
             if not stripped:
                 flush()
                 continue
@@ -125,6 +129,18 @@ def _extract(source: PDFSource) -> list[tuple[str, list[tuple[int, str]]]]:
         flush()
     if paragraphs:
         sections.append((title, paragraphs))
+    return sections
+
+
+def _extract(source: PDFSource) -> list[tuple[str, list[tuple[int, str]]]]:
+    reader = PdfReader(BytesIO(source.content))
+    if reader.is_encrypted:
+        raise ValueError(f"Encrypted PDF is unsupported: {source.relative_path}")
+    pages = [page.extract_text(extraction_mode="layout") for page in reader.pages]
+    visible = [[line.strip() for line in page.splitlines() if line.strip()] for page in pages]
+    headers = Counter(lines[0] for lines in visible if lines)
+    footers = Counter(lines[-1] for lines in visible if lines)
+    sections = _sections([_page_content(page, headers, footers) for page in pages])
     if not sections:
         raise ValueError(
             f"PDF has no extractable text; OCR is not supported: {source.relative_path}"

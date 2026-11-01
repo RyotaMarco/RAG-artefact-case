@@ -120,6 +120,9 @@ def test_actual_manual_extracts_payment_values_without_fallbacks() -> None:
     assert rules.pix_rate == Decimal("0.05")
     assert rules.non_cumulative is True
     assert rules.mixed_payment_minimum == Decimal("2000.00")
+    assert set(rules.single_payment_methods) == {"debit", "boleto"}
+    assert rules.quote(Decimal("100.01"), payment_method="debit").total == Decimal("100.01")
+    assert rules.quote(Decimal("100.01"), payment_method="boleto").total == Decimal("100.01")
     assert {(tier.minimum_count, tier.maximum_count) for tier in rules.installment_tiers} == {
         (1, 3),
         (4, 6),
@@ -154,3 +157,50 @@ def test_single_payment_methods_require_explicit_source_declaration(method: str)
         rules.quote(Decimal("123.45"), payment_method=method, installments=2)
     with pytest.raises(PolicyUnavailableError, match="no supported"):
         extract_rules(()).quote(Decimal("123.45"), payment_method=method)
+
+
+@pytest.mark.parametrize(
+    ("method", "text"),
+    [
+        ("debit", "Cartão de Débito Pagamento à vista Não aceitamos esta forma de pagamento."),
+        ("debit", "Cartão de Débito Não aceitamos pagamento à vista."),
+        ("debit", "Cartão de Débito Pagamento à vista Somente compras presenciais."),
+        ("boleto", "Boleto Bancário Pagamento à vista Não disponível para novas compras."),
+        ("boleto", "Boleto Bancário Não aceitamos pagamento à vista."),
+        ("boleto", "Boleto Bancário Pagamento à vista Exige cadastro aprovado."),
+    ],
+)
+def test_single_payment_denials_and_unknown_restrictions_never_enable_quotes(
+    method: str, text: str
+) -> None:
+    """An affirmative substring cannot erase a refusal or an unsupported condition."""
+    rules = extract_rules((section(text),))
+    assert method not in rules.single_payment_methods
+    assert rules.conflicts
+    with pytest.raises(PolicyUnavailableError, match="Conflicting"):
+        rules.quote(Decimal("100.00"), payment_method=method)
+
+
+def test_repeated_method_row_cannot_hide_a_later_denial() -> None:
+    """Inspect every occurrence and retain evidence for conflicting method conditions."""
+    rules = extract_rules(
+        (
+            section(
+                "Cartão de Débito Pagamento à vista Todas as bandeiras aceitas. "
+                "Cartão de Débito Pagamento à vista Não aceitamos esta forma de pagamento."
+            ),
+        )
+    )
+    assert rules.conflicts
+    assert rules.citations
+    with pytest.raises(PolicyUnavailableError):
+        rules.quote(Decimal("100.00"), payment_method="debit")
+
+
+def test_supported_settlement_days_are_source_values() -> None:
+    """Retain affirmative boleto conditions when the documented settlement period changes."""
+    rules = extract_rules(
+        (section("Boleto Bancário Pagamento à vista Compensação em até 5 dias úteis."),)
+    )
+    assert not rules.conflicts
+    assert rules.quote(Decimal("100.00"), payment_method="boleto").total == Decimal("100.00")
