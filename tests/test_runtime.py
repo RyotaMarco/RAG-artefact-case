@@ -13,7 +13,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from emporio_agent.config import Settings
-from emporio_agent.data import DataError
+from emporio_agent.data import Catalog, DataError, write_catalog
 from emporio_agent.embeddings import EmbeddingConfig, HFEmbedder
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.runtime import Snapshot, StoreRuntime
@@ -159,8 +159,8 @@ def _runtime(
     )
 
 
-def _database(settings: Settings, snapshot: Snapshot) -> Path:
-    return settings.runtime_dir / f"operational-{snapshot.generation_id}.sqlite3"
+def _database(settings: Settings) -> Path:
+    return settings.runtime_dir / "operational.sqlite3"
 
 
 def _scalar(path: Path, sql: str) -> object:
@@ -183,16 +183,15 @@ def test_unchanged_refresh_reuses_generation_and_does_not_embed_csv(tmp_path: Pa
     settings, runtime, embedder, tokenizer = _runtime(tmp_path)
     first = runtime.refresh()
     token_calls = tokenizer.calls
-    pointer = (settings.runtime_dir / "current.json").read_bytes()
+    published = _database(settings).read_bytes()
     assert runtime.refresh() is first
     assert tokenizer.calls == token_calls
     assert len(embedder.batches) == 1
     assert all("CSV_ONLY_SENTINEL" not in text for batch in embedder.batches for text in batch)
-    assert (settings.runtime_dir / "current.json").read_bytes() == pointer
-    assert _scalar(_database(settings, first), "SELECT price_cents FROM products") == 123456
-    assert (
-        _scalar(_database(settings, first), "SELECT typeof(price_cents) FROM products") == "integer"
-    )
+    assert _database(settings).read_bytes() == published
+    assert not (settings.runtime_dir / "current.json").exists()
+    assert _scalar(_database(settings), "SELECT price_cents FROM products") == 123456
+    assert _scalar(_database(settings), "SELECT typeof(price_cents) FROM products") == "integer"
     assert first.rules.quote(Decimal("100.00")).total == Decimal("95.00")
 
 
@@ -209,7 +208,7 @@ def test_runtime_accepts_arbitrary_csv_shards_and_portable_schema_metadata(
         )
     snapshot = StoreRuntime(settings).refresh()
     assert len(snapshot.catalog.tables["categories"].rows) == count
-    assert _scalar(_database(settings, snapshot), "SELECT COUNT(*) FROM categories") == count
+    assert _scalar(_database(settings), "SELECT COUNT(*) FROM categories") == count
     metadata = snapshot.catalog.describe()
     category_metadata = cast(dict[str, object], metadata["categories"])
     assert "row_count" not in category_metadata
@@ -238,13 +237,11 @@ def test_csv_updates_and_removals_replace_data_and_capabilities(tmp_path: Path) 
     updated = runtime.refresh()
     assert updated.generation_id != first.generation_id
     assert updated.capabilities()["promotions"] is True
-    assert (
-        _scalar(_database(settings, updated), "SELECT price_cents FROM products")
-        == 9007199254740993
-    )
-    assert _scalar(_database(settings, updated), "SELECT COUNT(*) FROM products") == 1
-    assert _scalar(_database(settings, updated), "SELECT stock_quantity FROM products") == 0
-    assert _scalar(_database(settings, first), "SELECT price_cents FROM products") == 123456
+    assert _scalar(_database(settings), "SELECT price_cents FROM products") == 9007199254740993
+    assert _scalar(_database(settings), "SELECT COUNT(*) FROM products") == 1
+    assert _scalar(_database(settings), "SELECT stock_quantity FROM products") == 0
+    assert first.catalog.tables["products"].rows[0]["price_cents"] == 123456
+    assert list(settings.runtime_dir.glob("operational*.sqlite3")) == [_database(settings)]
     (settings.data_dir / "offers.csv").unlink()
     (settings.data_dir / "inventory-export.csv").unlink()
     reduced = runtime.refresh()
@@ -252,6 +249,8 @@ def test_csv_updates_and_removals_replace_data_and_capabilities(tmp_path: Path) 
     assert reduced.capabilities()["catalog"] is False
     assert reduced.capabilities()["promotions"] is False
     assert "products" not in reduced.catalog.describe()
+    assert list(settings.runtime_dir.glob("operational*.sqlite3")) == [_database(settings)]
+    assert _scalar(_database(settings), "SELECT COUNT(*) FROM categories") == 1
 
 
 def test_order_capability_requires_both_order_and_customer_sources(tmp_path: Path) -> None:
@@ -279,29 +278,112 @@ def test_invalid_candidate_raises_without_replacing_current_snapshot(tmp_path: P
     """A failed candidate is visible as an error and cannot silently publish partial tables."""
     settings, runtime, _, _ = _runtime(tmp_path)
     first = runtime.refresh()
-    pointer = settings.runtime_dir / "current.json"
-    published = pointer.read_bytes()
+    published = _database(settings).read_bytes()
     invalid = settings.data_dir / "unexpected.csv"
     invalid.write_text("unsupported,fields\n1,2\n", encoding="utf-8")
     with pytest.raises(DataError, match="unexpected.csv"):
         runtime.refresh()
-    assert pointer.read_bytes() == published
-    assert _scalar(_database(settings, first), "SELECT COUNT(*) FROM products") == 1
+    assert _database(settings).read_bytes() == published
+    assert getattr(runtime, "_current") is first
+    assert _scalar(_database(settings), "SELECT COUNT(*) FROM products") == 1
     invalid.unlink()
     assert runtime.refresh() is first
+
+
+def test_successful_publication_prunes_only_legacy_catalog_files(tmp_path: Path) -> None:
+    """Remove known old generation files after success without touching unrelated runtime data."""
+    settings = _settings(tmp_path)
+    _categories(settings.data_dir)
+    runtime = StoreRuntime(settings)
+    runtime.refresh()
+    legacy = settings.runtime_dir / f"operational-{'a' * 64}.sqlite3"
+    legacy.write_bytes(b"legacy catalog")
+    unrelated = settings.runtime_dir / "operational-user-backup.sqlite3"
+    unrelated.write_bytes(b"keep this file")
+    nested = settings.runtime_dir / "archive" / f"operational-{'b' * 64}.sqlite3"
+    nested.parent.mkdir()
+    nested.write_bytes(b"keep nested files")
+    matching_directory = settings.runtime_dir / f"operational-{'c' * 64}.sqlite3"
+    matching_directory.mkdir()
+    invalid = settings.data_dir / "unexpected.csv"
+    invalid.write_text("unsupported,fields\n1,2\n", encoding="utf-8")
+    with pytest.raises(DataError):
+        runtime.refresh()
+    assert legacy.exists()
+    invalid.unlink()
+    _products(settings.data_dir)
+    runtime.refresh()
+    assert not legacy.exists()
+    assert unrelated.read_bytes() == b"keep this file"
+    assert nested.read_bytes() == b"keep nested files"
+    assert matching_directory.is_dir()
+    assert _database(settings).is_file()
+
+
+def test_failed_atomic_replace_preserves_database_snapshot_and_allows_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted publication cannot overwrite the database or advance the active snapshot."""
+    settings = _settings(tmp_path)
+    _categories(settings.data_dir)
+    _products(settings.data_dir)
+    runtime = StoreRuntime(settings)
+    first = runtime.refresh()
+    published = _database(settings).read_bytes()
+    _products(settings.data_dir, "777.00")
+
+    def reject_replace(_source: Path, _target: Path) -> None:
+        raise PermissionError("Fixture database replacement failed.")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("emporio_agent.runtime.os.replace", reject_replace)
+        with pytest.raises(PermissionError, match="replacement failed"):
+            runtime.refresh()
+    assert _database(settings).read_bytes() == published
+    assert getattr(runtime, "_current") is first
+    assert not list(settings.runtime_dir.glob("*.pending"))
+    recovered = runtime.refresh()
+    assert recovered.generation_id != first.generation_id
+    assert _scalar(_database(settings), "SELECT price_cents FROM products") == 77700
+
+
+def test_source_change_during_database_write_cannot_replace_active_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final input check happens after SQLite creation and before its atomic replacement."""
+    settings = _settings(tmp_path)
+    _categories(settings.data_dir)
+    _products(settings.data_dir)
+    runtime = StoreRuntime(settings)
+    first = runtime.refresh()
+    published = _database(settings).read_bytes()
+    _products(settings.data_dir, "444.00")
+
+    def change_after_write(catalog: Catalog, path: Path) -> None:
+        write_catalog(catalog, path)
+        _products(settings.data_dir, "555.00")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("emporio_agent.runtime.write_catalog", change_after_write)
+        with pytest.raises(DataError, match="changed during ingestion"):
+            runtime.refresh()
+    assert _database(settings).read_bytes() == published
+    assert getattr(runtime, "_current") is first
+    assert not list(settings.runtime_dir.glob("*.pending"))
+    assert runtime.refresh().catalog.tables["products"].rows[0]["price_cents"] == 55500
 
 
 def test_provider_failure_preserves_current_then_allows_retry(tmp_path: Path) -> None:
     """Failed PDF indexing cannot publish the catalog or rules from a candidate generation."""
     settings, runtime, embedder, _ = _runtime(tmp_path)
     first = runtime.refresh()
-    pointer = settings.runtime_dir / "current.json"
-    published = pointer.read_bytes()
+    published = _database(settings).read_bytes()
     _payments(settings.data_dir / "policies.pdf", "7")
     embedder.fail = True
     with pytest.raises(TimeoutError, match="timed out"):
         runtime.refresh()
-    assert pointer.read_bytes() == published
+    assert _database(settings).read_bytes() == published
+    assert getattr(runtime, "_current") is first
     assert first.rules.pix_rate == Decimal("0.05")
     embedder.fail = False
     recovered = runtime.refresh()
@@ -310,16 +392,16 @@ def test_provider_failure_preserves_current_then_allows_retry(tmp_path: Path) ->
 
 
 def test_inputs_changed_during_indexing_cannot_be_published(tmp_path: Path) -> None:
-    """Recheck the whole inventory before switching the pointer to a new generation."""
+    """Recheck the whole inventory before replacing the published operational database."""
     settings, runtime, embedder, _ = _runtime(tmp_path)
     first = runtime.refresh()
-    pointer = settings.runtime_dir / "current.json"
-    published = pointer.read_bytes()
+    published = _database(settings).read_bytes()
     _payments(settings.data_dir / "policies.pdf", "8")
     embedder.on_documents = lambda: _products(settings.data_dir, "888.00")
     with pytest.raises(DataError, match="changed during ingestion"):
         runtime.refresh()
-    assert pointer.read_bytes() == published
+    assert _database(settings).read_bytes() == published
+    assert getattr(runtime, "_current") is first
     assert first.catalog.tables["products"].rows[0]["price_cents"] == 123456
     recovered = runtime.refresh()
     assert recovered.catalog.tables["products"].rows[0]["price_cents"] == 88800
@@ -381,7 +463,7 @@ def test_restart_reuses_metadata_and_persisted_vectors_without_provider_calls(
     assert tokenizer.calls == 0
     assert len(client.calls) == 1
     assert restored.rules.pix_rate == Decimal("0.05")
-    assert _scalar(_database(settings, restored), "SELECT COUNT(*) FROM categories") == 1
+    assert _scalar(_database(settings), "SELECT COUNT(*) FROM categories") == 1
 
 
 @pytest.mark.parametrize("empty_chunks", [False, True])

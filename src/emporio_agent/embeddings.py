@@ -10,8 +10,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Protocol
 
-import httpx
 import numpy as np
+from huggingface_hub.errors import HfHubHTTPError, InferenceTimeoutError
 from tokenizers import Tokenizer
 
 
@@ -194,11 +194,11 @@ class HFEmbedder:
                     response = self._client.feature_extraction(
                         batch, model=self.config.model, normalize=True, truncate=False
                     )
-                except httpx.TimeoutException as error:
+                except InferenceTimeoutError as error:
                     raise ValueError(
                         "The embedding provider timed out. Please retry later."
                     ) from error
-                except httpx.HTTPStatusError as error:
+                except HfHubHTTPError as error:
                     status = error.response.status_code
                     reason = {
                         401: "Check HF_TOKEN and inference permissions.",
