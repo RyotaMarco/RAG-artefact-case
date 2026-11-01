@@ -251,11 +251,15 @@ class StoreTools:
             if type(quantity) is not int or not 1 <= quantity <= stock:
                 raise ValueError("The requested quantity exceeds available stock or is invalid.")
             original = check_cents(check_cents(product["price_cents"]) * quantity)
-            rates = [
+            rates = {
                 Decimal(str(row["discount_percent"]))
                 for row in tables["promotions"].rows
                 if row["product_id"] == product_id and row["is_active"] == 1
-            ]
+            }
+            if len(rates) > 1:
+                raise PolicyUnavailableError(
+                    "Multiple active discounts apply to this product. Staff must confirm the offer."
+                )
             promotional = bool(rates)
             rate = max(rates) if rates else Decimal(0)
             current = discounted_cents(original, str(rate))
@@ -283,6 +287,7 @@ class StoreTools:
                 "total": format_brl(total),
                 "installment_amounts": [format_brl(value) for value in amounts],
                 "sources": references,
+                "policy_note": quote.note,
                 "note": "Installment amounts sum exactly to the quoted total. This is not a purchase.",
             }
         except (ValueError, ArithmeticError) as error:

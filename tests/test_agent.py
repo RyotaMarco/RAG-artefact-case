@@ -2,6 +2,7 @@
 
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,28 @@ from emporio_agent.agent import (
 )
 from emporio_agent.config import Settings
 from emporio_agent.runtime import Snapshot
+
+
+@pytest.mark.parametrize("second_rate", ["10", "20"])
+def test_multiple_active_promotions_require_unambiguous_discount(
+    tmp_path: Path, second_rate: str
+) -> None:
+    """Repeated equal discounts are safe; distinct offers have no implicit priority."""
+    snapshot = small_snapshot(price_cents=10000, promotion_percent="10")
+    promotions = snapshot.catalog.tables["promotions"]
+    other = dict(promotions.rows[0])
+    other.update(promotion_id=302, discount_percent=second_rate)
+    tables = dict(snapshot.catalog.tables)
+    tables["promotions"] = replace(promotions, rows=(*promotions.rows, other))
+    snapshot = replace(snapshot, catalog=replace(snapshot.catalog, tables=tables))
+    with _agent(_settings(tmp_path), snapshot, conversation_token(), []) as (_, tools, _):
+        result = tools.calculate_quote(101)
+    if second_rate == "20":
+        assert "Staff must confirm" in str(result["error"])
+        assert "total" not in result
+    else:
+        assert result["total"] == "BRL 90.00"
+        assert result["policy_note"] == "PIX discount does not stack with a promotional price."
 
 
 def test_provider_failure_is_not_presented_as_a_completed_answer(tmp_path: Path) -> None:
