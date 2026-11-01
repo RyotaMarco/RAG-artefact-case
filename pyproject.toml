@@ -7,9 +7,11 @@ dependencies = [
   "agno>=2.2",
   "anthropic>=0.75",
   "httpx>=0.28",
+  "httpx2>=2.16",
   "huggingface-hub>=0.34",
   "numpy>=2.2",
   "pypdf>=6.0",
+  "pydantic>=2.12",
   "rank-bm25>=0.2.2",
   "sqlalchemy>=2.0",
   "sqlglot>=28",
@@ -43,5 +45,6 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "D100", "D101", "D102", "D103", "D20
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
 addopts = "-ra --strict-markers"
 markers = ["live: uses paid external APIs and requires explicit opt-in", "e2e: browser tests"]
