@@ -11,7 +11,6 @@ from decimal import Decimal, localcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import httpx
 import httpx2
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
@@ -59,6 +58,8 @@ Historical order totals are authoritative; current product prices cannot reconst
 
 SQL uses INTEGER cents in price_cents and total_cents. For a BRL budget use an integer-cent bound,
 for example BRL 1000 means 100000 cents. query_data formats monetary results back into BRL strings.
+discount_percent is exact decimal text with numeric comparison. Quote fractional bounds in SQL,
+for example discount_percent > '7.5'; SQL numeric literals are restricted to integers.
 Use search_name with LIKE and a case/accent/punctuation-free substring for flexible product names.
 Straight SELECT, key joins, typed filters, sorting, COUNT and controlled SUM/AVG are supported.
 No arithmetic, casts, subqueries, extensions or schema introspection. Never weaken a rejected query.
@@ -95,7 +96,7 @@ def _citations(values: tuple[Citation, ...]) -> list[dict[str, object]]:
 class ConversationAccess:
     """Persist server-owned order authorization separately from model-authored text."""
 
-    def __init__(self, database: Path, token: str, generation: str = "") -> None:
+    def __init__(self, database: Path, token: str, generation: str) -> None:
         """Initialize private state for an unguessable conversation capability."""
         database.parent.mkdir(parents=True, exist_ok=True)
         self.database = database
@@ -181,8 +182,8 @@ class StoreTools:
                 self.sources.extend(references)
                 passages.append({"text": hit.text, "sources": references})
             return {"passages": passages, "generation": self.snapshot.generation_id}
-        except (ValueError, httpx.HTTPError) as error:
-            return {"error": f"Policy retrieval is unavailable: {type(error).__name__}."}
+        except ValueError as error:
+            return {"error": f"Policy retrieval is unavailable: {error}"}
 
     def verify_order(self, order_id: int, email: str) -> dict[str, object]:
         """Verify one order/contact pair before private order queries.
@@ -290,7 +291,7 @@ class StoreTools:
                 "total": format_brl(total),
                 "installment_amounts": [format_brl(value) for value in amounts],
                 "sources": references,
-                "policy_note": quote.note,
+                "policy_note": quote.note if installments == 1 else None,
                 "note": "Installment amounts sum exactly to the quoted total. This is not a purchase.",
             }
         except (ValueError, ArithmeticError) as error:
@@ -299,19 +300,10 @@ class StoreTools:
 
 def _recent_history(agent: Agent, token: str) -> list[Message]:
     """Reconstruct text-only history, without replaying signed provider/tool blocks."""
-    if agent.get_session(session_id=token) is None:
-        return []
-    messages = agent.get_session_messages(session_id=token, last_n_runs=3)
-    history: list[Message] = []
-    for message in messages:
-        if (
-            message.role in {"user", "assistant"}
-            and isinstance(message.content, str)
-            and not message.tool_calls
-            and not message.from_history
-        ):
-            history.append(Message(role=message.role, content=message.content, from_history=True))
-    return history
+    return [
+        Message(role=message["role"], content=message["content"], from_history=True)
+        for message in chat_messages(agent, token, last_n_runs=3)
+    ]
 
 
 def build_agent(
@@ -374,12 +366,23 @@ def build_agent(
     return agent, tools
 
 
-def chat_messages(agent: Agent, token: str) -> list[dict[str, str]]:
-    """Read completed display messages without exposing provider reasoning or tool results."""
+def chat_messages(
+    agent: Agent, token: str, *, last_n_runs: int | None = None
+) -> list[dict[str, str]]:
+    """Read completed text without provider reasoning or tool results.
+
+    Parameters:
+        agent: The current conversation's agent and session storage.
+        token: The conversation identifier.
+        last_n_runs: Optional completed-turn limit; the UI reads all turns by default.
+
+    Returns:
+        User and final assistant text, shared by display and model-history reconstruction.
+    """
     if agent.get_session(session_id=token) is None:
         return []
     messages: list[dict[str, str]] = []
-    for message in agent.get_session_messages(session_id=token):
+    for message in agent.get_session_messages(session_id=token, last_n_runs=last_n_runs):
         if (
             message.role in {"user", "assistant"}
             and isinstance(message.content, str)

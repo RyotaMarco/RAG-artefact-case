@@ -12,6 +12,7 @@ import httpx2
 import pytest
 from agent_fixtures import (
     ClaudeStub,
+    FixedEmbedder,
     JsonObject,
     latest_user_text,
     small_snapshot,
@@ -33,8 +34,38 @@ from emporio_agent.agent import (
     run_chat,
 )
 from emporio_agent.config import Settings
+from emporio_agent.documents import PolicyIndex
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine
+
+
+def test_policy_tool_keeps_safe_provider_recovery_guidance(tmp_path: Path) -> None:
+    """A translated provider failure reaches the real agent tool result with useful guidance."""
+
+    class UnavailableEmbedder(FixedEmbedder):
+        def embed_query(self, query: str) -> tuple[float, ...]:
+            """Represent the safe error raised at the hosted embedding boundary."""
+            raise ValueError("The embedding provider request limit was reached. Retry later.")
+
+    snapshot = small_snapshot()
+    assert snapshot.policies is not None
+    policies = PolicyIndex(
+        snapshot.policies.chunks,
+        snapshot.policies.sections,
+        UnavailableEmbedder(),
+        snapshot.policies.fingerprint,
+    )
+    with _agent(
+        _settings(tmp_path),
+        replace(snapshot, policies=policies),
+        conversation_token(),
+        [
+            tool_response("search_policies", {"query": "payment"}),
+            text_response("Please retry later."),
+        ],
+    ) as (agent, _, stub):
+        run_chat(agent, "What payment methods are available?")
+        assert "request limit was reached. Retry later." in str(tool_results(stub.requests[-1]))
 
 
 def test_valid_order_details_recover_after_repeated_failures_and_resume(tmp_path: Path) -> None:
@@ -221,6 +252,7 @@ def test_quote_uses_current_rules_and_exact_cent_allocation(
         result = tool_results(stub.requests[-1])[0]
         assert result["total"] == total
         assert result["installment_amounts"] == amounts
+        assert "approximate" not in str(result)
         assert sum(
             Decimal(value.removeprefix("BRL ").replace(",", "")) for value in amounts
         ) == Decimal(total.removeprefix("BRL ").replace(",", ""))
