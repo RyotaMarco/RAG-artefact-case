@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from decimal import localcontext
@@ -19,6 +21,7 @@ from emporio_agent.config import Settings
 from emporio_agent.data import (
     Catalog,
     DataError,
+    SourceFile,
     build_catalog,
     discover_sources,
     inventory_fingerprint,
@@ -30,7 +33,8 @@ from emporio_agent.policies import FinancialRuleSet, extract_rules
 
 TOKENIZER_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 TOKENIZER_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
-PIPELINE_VERSION = "layout-catalog-money-v1"
+PIPELINE_VERSION = "layout-catalog-money-v2"
+logger = logging.getLogger(__name__)
 
 
 class ConfigurationError(ValueError):
@@ -96,6 +100,81 @@ class StoreRuntime:
         self._current: Snapshot | None = None
         self._lock = RLock()
 
+    def _policy_resources(self) -> None:
+        """Initialize the hosted provider and local tokenizer only when PDFs need them."""
+        if self._embedder is None:
+            if not self.settings.hf_token:
+                raise ConfigurationError("HF_TOKEN is required to index the supplied PDFs.")
+            self._embedder = HFEmbedder(
+                self.settings.runtime_dir / "vectors.sqlite3",
+                client=InferenceClient(
+                    provider="deepinfra", token=self.settings.hf_token, timeout=30
+                ),
+            )
+        if self._tokenizer is None:
+            self._tokenizer = load_tokenizer(self.settings.runtime_dir)
+
+    def _policy_index(
+        self,
+        pdfs: tuple[SourceFile, ...],
+        generation: str,
+        embedder: Embedder,
+        tokenizer: TextTokenizer,
+    ) -> PolicyIndex:
+        """Restore validated policy metadata or atomically cache a rebuilt index."""
+        metadata_path = self.settings.runtime_dir / f"policies-{generation}.json"
+        if metadata_path.exists():
+            try:
+                cached = _IndexCache.model_validate_json(metadata_path.read_bytes())
+                if cached.generation_id == generation:
+                    return PolicyIndex(
+                        cached.chunks, cached.sections, embedder, cached.index_fingerprint
+                    )
+            except (ValidationError, OSError):
+                pass
+        index = build_index(pdfs, embedder, tokenizer)
+        cache = _IndexCache(
+            generation_id=generation,
+            index_fingerprint=index.fingerprint,
+            chunks=index.chunks,
+            sections=index.sections,
+        )
+        candidate = metadata_path.with_suffix(".pending")
+        candidate.write_text(cache.model_dump_json(), encoding="utf-8")
+        os.replace(candidate, metadata_path)
+        return index
+
+    def _publish(self, snapshot: Snapshot, source_id: str) -> None:
+        """Replace the sole operational database only after the candidate passes validation."""
+        runtime_dir = self.settings.runtime_dir
+        with tempfile.NamedTemporaryFile(
+            dir=runtime_dir, suffix=".pending", delete=False
+        ) as candidate:
+            candidate_path = Path(candidate.name)
+        try:
+            write_catalog(snapshot.catalog, candidate_path)
+            if inventory_fingerprint(discover_sources(self.settings.data_dir)) != source_id:
+                raise DataError("Input files changed during ingestion. Retry after updates finish.")
+            os.replace(candidate_path, runtime_dir / "operational.sqlite3")
+            self._current = snapshot
+        finally:
+            candidate_path.unlink(missing_ok=True)
+
+    def _prune_legacy_catalogs(self) -> None:
+        """Remove only old generation catalogs directly inside the resolved runtime directory."""
+        root = self.settings.runtime_dir.resolve()
+        for path in root.glob("operational-*.sqlite3"):
+            try:
+                if (
+                    re.fullmatch(r"operational-[0-9a-f]{64}\.sqlite3", path.name)
+                    and not path.is_symlink()
+                    and path.resolve().parent == root
+                    and path.is_file()
+                ):
+                    path.unlink()
+            except OSError as error:
+                logger.warning("Old operational catalog cleanup failed: %s", type(error).__name__)
+
     def refresh(self) -> Snapshot:
         """Validate a candidate completely before publishing it to new agent runs.
 
@@ -111,17 +190,7 @@ class StoreRuntime:
                 source for source in sources if source.relative_path.lower().endswith(".pdf")
             )
             if pdfs:
-                if self._embedder is None:
-                    if not self.settings.hf_token:
-                        raise ConfigurationError("HF_TOKEN is required to index the supplied PDFs.")
-                    self._embedder = HFEmbedder(
-                        runtime_dir / "vectors.sqlite3",
-                        client=InferenceClient(
-                            provider="deepinfra", token=self.settings.hf_token, timeout=30
-                        ),
-                    )
-                if self._tokenizer is None:
-                    self._tokenizer = load_tokenizer(runtime_dir)
+                self._policy_resources()
             identity = (
                 source_id,
                 PIPELINE_VERSION,
@@ -135,57 +204,13 @@ class StoreRuntime:
                 return self._current
             catalog = build_catalog(sources)
             index: PolicyIndex | None = None
-            metadata_valid = False
-            metadata_path = runtime_dir / f"policies-{generation}.json"
             if pdfs:
                 assert self._embedder is not None and self._tokenizer is not None
-                if metadata_path.exists():
-                    try:
-                        cached = _IndexCache.model_validate_json(metadata_path.read_bytes())
-                        if cached.generation_id == generation:
-                            index = PolicyIndex(
-                                cached.chunks,
-                                cached.sections,
-                                self._embedder,
-                                cached.index_fingerprint,
-                            )
-                            metadata_valid = True
-                    except (ValidationError, OSError):
-                        index = None
-                if index is None:
-                    index = build_index(pdfs, self._embedder, self._tokenizer)
+                index = self._policy_index(pdfs, generation, self._embedder, self._tokenizer)
             with localcontext() as context:
                 context.prec = 120
                 rules = extract_rules(index.sections if index is not None else ())
-            database_path = runtime_dir / f"operational-{generation}.sqlite3"
-            if not database_path.exists():
-                with tempfile.NamedTemporaryFile(
-                    dir=runtime_dir, suffix=".pending", delete=False
-                ) as candidate:
-                    candidate_path = Path(candidate.name)
-                try:
-                    write_catalog(catalog, candidate_path)
-                    os.replace(candidate_path, database_path)
-                finally:
-                    candidate_path.unlink(missing_ok=True)
-            if index is not None and not metadata_valid:
-                cache = _IndexCache(
-                    generation_id=generation,
-                    index_fingerprint=index.fingerprint,
-                    chunks=index.chunks,
-                    sections=index.sections,
-                )
-                candidate_metadata = runtime_dir / f"policies-{generation}.pending"
-                candidate_metadata.write_text(cache.model_dump_json(), encoding="utf-8")
-                os.replace(candidate_metadata, metadata_path)
             snapshot = Snapshot(generation, catalog, index, rules)
-            if inventory_fingerprint(discover_sources(self.settings.data_dir)) != source_id:
-                raise DataError("Input files changed during ingestion. Retry after updates finish.")
-            pointer = runtime_dir / "current.pending"
-            pointer.write_text(
-                json.dumps({"generation_id": generation, "source_fingerprint": source_id}),
-                encoding="utf-8",
-            )
-            os.replace(pointer, runtime_dir / "current.json")
-            self._current = snapshot
+            self._publish(snapshot, source_id)
+            self._prune_legacy_catalogs()
             return snapshot
