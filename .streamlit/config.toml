@@ -1,0 +1,22 @@
+[server]
+headless = true
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#176B55"
+backgroundColor = "#FAFAF7"
+secondaryBackgroundColor = "#F0F2ED"
+textColor = "#202923"
+font = "Manrope:https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap"
+baseFontSize = 16
+baseFontWeight = 400
+headingFontSizes = ["2.25rem", "1.5rem", "1.25rem", "1.125rem", "1rem", "1rem"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
