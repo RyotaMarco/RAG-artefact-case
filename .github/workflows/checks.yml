@@ -1,0 +1,100 @@
+name: Checks
+
+on:
+  push:
+    branches:
+      - main
+      - Development
+      - 'feature/**'
+      - 'test/**'
+      - 'fix/**'
+      - 'chore/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: '0.13.6'
+  PYTHON_VERSION: '3.12.16'
+
+jobs:
+  branch-flow:
+    name: branch-flow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python scripts/check_branch_flow.py
+
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run --locked pyright
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+
+  tests:
+    name: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run --locked playwright install --with-deps chromium
+      - run: uv run --locked pytest -m "not live"
+
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image
+        run: docker build --target production --tag emporio-agent:ci .
+      - name: Check production health
+        shell: bash
+        run: |
+          docker run --detach --name emporio-health --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --mount type=volume,source=emporio-ci-runtime,target=/app/runtime \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            emporio-agent:ci
+          for attempt in {1..18}; do
+            state=$(docker inspect --format '{{.State.Health.Status}}' emporio-health)
+            if [ "$state" = healthy ]; then exit 0; fi
+            if [ "$state" = unhealthy ]; then break; fi
+            sleep 5
+          done
+          docker logs emporio-health
+          exit 1
+      - name: Build browser test image
+        run: docker build --target test --tag emporio-agent:test .
+      - name: Run container browser tests
+        run: docker run --rm --init --ipc=host emporio-agent:test uv run --no-sync pytest -m "e2e and not live"
+      - name: Stop smoke container
+        if: always()
+        run: docker rm --force emporio-health || true

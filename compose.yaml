@@ -1,0 +1,29 @@
+services:
+  app:
+    build:
+      context: .
+      target: production
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5-5}
+      DATA_DIR: /app/data
+      RUNTIME_DIR: /app/runtime
+    volumes:
+      - ./data:/app/data:ro
+      - runtime_data:/app/runtime
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 128
+    init: true
+
+volumes:
+  runtime_data:
