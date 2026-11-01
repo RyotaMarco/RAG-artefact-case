@@ -209,7 +209,13 @@ def _read_csv(source: SourceFile) -> tuple[str, list[Row]]:
         headers = tuple(value.strip() for value in next(reader))
         if len(set(headers)) != len(headers):
             raise DataError("CSV headers must be unique.")
-        matches = [name for name, required in _HEADERS.items() if set(required) <= set(headers)]
+        known_headers = {column for required in _HEADERS.values() for column in required}
+        matches = [
+            name
+            for name, required in _HEADERS.items()
+            if set(required) <= set(headers)
+            and not ((set(headers) & known_headers) - set(required))
+        ]
         if matches:
             specificity = max(len(_HEADERS[name]) for name in matches)
             matches = [name for name in matches if len(_HEADERS[name]) == specificity]

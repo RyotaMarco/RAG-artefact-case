@@ -65,6 +65,16 @@ def test_unknown_or_malformed_csv_is_not_guessed() -> None:
         build_catalog((_source("unknown.csv", "something,else\na,b\n"),))
     with pytest.raises(DataError, match="wrong number"):
         build_catalog((_source("bad.csv", "category_id,name,description\n1,Name\n"),))
+    with pytest.raises(DataError, match="supported business schema"):
+        build_catalog(
+            (
+                _source(
+                    "incomplete-products.csv",
+                    "product_id,name,category_id,description,stock_quantity,status,"
+                    "specs,created_at\n1,Name,1,Description,1,active,{},2026-01-01\n",
+                ),
+            )
+        )
 
 
 def test_foreign_keys_are_checked_when_related_tables_exist() -> None:

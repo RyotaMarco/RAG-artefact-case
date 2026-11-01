@@ -99,7 +99,7 @@ class QueryResult:
                     for index, value in enumerate(row)
                 ]
             )
-        return {
+        result: dict[str, object] = {
             "columns": self.columns,
             "rows": rendered,
             "column_units": {self.columns[index]: "BRL" for index in self.money_indexes},
@@ -107,6 +107,9 @@ class QueryResult:
             "sources": self.source_paths,
             "rounding": "Monetary AVG is rounded to cents using HALF_UP.",
         }
+        if len(json.dumps(result, ensure_ascii=False).encode()) > MAX_RESULT_BYTES:
+            raise QueryError("The formatted result is too large; narrow the query.")
+        return result
 
 
 def _direct(expression: exp.Expr) -> exp.Expr:
