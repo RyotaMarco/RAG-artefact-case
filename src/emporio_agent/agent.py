@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -100,7 +101,7 @@ class ConversationAccess:
         self.database = database
         self.identity = hashlib.sha256(token.encode()).hexdigest()
         self.generation = generation
-        with sqlite3.connect(database, timeout=10) as connection:
+        with closing(sqlite3.connect(database, timeout=10)) as connection, connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS store_access ("
                 "identity TEXT PRIMARY KEY, order_id INTEGER, failures INTEGER NOT NULL, "
@@ -123,7 +124,7 @@ class ConversationAccess:
 
     def verified_order(self) -> int | None:
         """Read an order scope that can only have been established by trusted code."""
-        with sqlite3.connect(self.database, timeout=10) as connection:
+        with closing(sqlite3.connect(self.database, timeout=10)) as connection, connection:
             row = connection.execute(
                 "SELECT order_id FROM store_access WHERE identity = ? AND generation = ?",
                 (self.identity, self.generation),
@@ -132,7 +133,7 @@ class ConversationAccess:
 
     def verify(self, engine: QueryEngine, order_id: int, email: str) -> bool:
         """Check the order/contact pair and never preserve an old scope after failure."""
-        with sqlite3.connect(self.database, timeout=10) as connection:
+        with closing(sqlite3.connect(self.database, timeout=10)) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT failures, generation FROM store_access WHERE identity = ?", (self.identity,)

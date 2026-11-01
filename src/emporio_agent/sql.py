@@ -22,6 +22,15 @@ MAX_RESULT_BYTES = 32 * 1024
 QUERY_TIMEOUT_SECONDS = 3
 _PUBLIC = {"products", "categories", "promotions"}
 _PRIVATE = {"orders", "order_items"}
+_JOIN_KEYS = frozenset(
+    frozenset((left, right))
+    for left, right in (
+        (("products", "category_id"), ("categories", "category_id")),
+        (("promotions", "product_id"), ("products", "product_id")),
+        (("order_items", "order_id"), ("orders", "order_id")),
+        (("order_items", "product_id"), ("products", "product_id")),
+    )
+)
 _ALLOWED_NODES: frozenset[type[exp.Expr]] = frozenset(
     {
         exp.Select,
@@ -160,6 +169,53 @@ def _typed_money_operand(expression: exp.Expr, aliases: Mapping[str, Table]) -> 
     return _is_money(expression, aliases) or _integer_literal(expression)
 
 
+def _validate_joins(
+    query: exp.Select, aliases: Mapping[str, Table], names: Mapping[str, str]
+) -> None:
+    """Require every joined table to connect through a declared business foreign key."""
+    source = query.args.get("from_")
+    if not isinstance(source, exp.From) or not isinstance(source.this, exp.Table):
+        raise QueryError("A query must start from one available business table.")
+    if len(set(names.values())) != len(names):
+        raise QueryError("Self-joins and repeated business tables are not permitted.")
+    prior = {source.this.alias_or_name.casefold()}
+    joins = cast(list[exp.Join], query.args.get("joins") or [])
+    for join in joins:
+        shape = (join.args.get("side", ""), join.args.get("kind", ""))
+        if (
+            shape not in {("", ""), ("", "INNER"), ("LEFT", ""), ("LEFT", "OUTER")}
+            or not isinstance(join.this, exp.Table)
+            or any(
+                value
+                for key, value in join.args.items()
+                if key not in {"this", "on", "side", "kind"}
+            )
+        ):
+            raise QueryError("Only INNER or LEFT joins with explicit key equality are permitted.")
+        condition = join.args.get("on")
+        if not isinstance(condition, exp.Expr) or not isinstance(_direct(condition), exp.EQ):
+            raise QueryError("Each join requires one equality on a known business key.")
+        equality = cast(exp.EQ, _direct(condition))
+        left, right = _direct(equality.left), _direct(equality.right)
+        if not isinstance(left, exp.Column) or not isinstance(right, exp.Column):
+            raise QueryError("Join keys must be direct business columns.")
+        left_alias, left_name = _resolve_column(left, aliases)
+        right_alias, right_name = _resolve_column(right, aliases)
+        new_alias = join.this.alias_or_name.casefold()
+        connected = {left_alias, right_alias}
+        keys = frozenset(((names[left_alias], left_name), (names[right_alias], right_name)))
+        if (
+            len(connected) != 2
+            or new_alias not in connected
+            or not connected.difference({new_alias}).issubset(prior)
+            or keys not in _JOIN_KEYS
+        ):
+            raise QueryError(
+                "Each join must connect its new table to a prior table by a known key."
+            )
+        prior.add(new_alias)
+
+
 def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[int, ...], set[str]]:
     if len(sql) > 16_384:
         raise QueryError("The SQL query is too long.")
@@ -171,6 +227,7 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
         raise QueryError("Only one plain SELECT query is permitted.")
     query = parsed[0]
     aliases: dict[str, Table] = {}
+    names: dict[str, str] = {}
     used: set[str] = set()
     for table_node in query.find_all(exp.Table):
         name = table_node.name.casefold()
@@ -178,9 +235,11 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
         if table_node.db or table_node.catalog or name not in tables or alias in aliases:
             raise QueryError("The SQL query references an unavailable table or alias.")
         aliases[alias] = tables[name]
+        names[alias] = name
         used.add(name)
     if not aliases:
         raise QueryError("A query must read an available business table.")
+    _validate_joins(query, aliases, names)
 
     expanded: list[exp.Expr] = []
     for projection in query.expressions:

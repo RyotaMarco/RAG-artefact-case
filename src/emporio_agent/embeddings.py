@@ -3,12 +3,14 @@
 import json
 import sqlite3
 from collections.abc import Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 from typing import Protocol
 
+import httpx
 import numpy as np
 from tokenizers import Tokenizer
 
@@ -140,7 +142,7 @@ class HFEmbedder:
         self._path = cache_path
         self._lock = RLock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._path) as connection:
+        with closing(sqlite3.connect(self._path)) as connection, connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS vectors "
                 "(cache_key TEXT PRIMARY KEY, vector_json TEXT NOT NULL)"
@@ -175,7 +177,7 @@ class HFEmbedder:
         if not texts:
             return []
         keys = [sha256((self.fingerprint + text).encode()).hexdigest() for text in texts]
-        with self._lock, sqlite3.connect(self._path, timeout=10) as connection:
+        with self._lock, closing(sqlite3.connect(self._path, timeout=10)) as connection, connection:
             cached: dict[str, tuple[float, ...]] = {}
             for key in set(keys):
                 row = connection.execute(
@@ -188,9 +190,25 @@ class HFEmbedder:
             for offset in range(0, len(missing), 32):
                 batch_keys = missing[offset : offset + 32]
                 batch = [by_key[key] for key in batch_keys]
-                response = self._client.feature_extraction(
-                    batch, model=self.config.model, normalize=True, truncate=False
-                )
+                try:
+                    response = self._client.feature_extraction(
+                        batch, model=self.config.model, normalize=True, truncate=False
+                    )
+                except httpx.TimeoutException as error:
+                    raise ValueError(
+                        "The embedding provider timed out. Please retry later."
+                    ) from error
+                except httpx.HTTPStatusError as error:
+                    status = error.response.status_code
+                    reason = {
+                        401: "Check HF_TOKEN and inference permissions.",
+                        403: "Check HF_TOKEN and inference permissions.",
+                        402: "The embedding provider reports insufficient credits.",
+                        429: "The embedding provider request limit was reached. Retry later.",
+                    }.get(status, "Check the provider configuration and retry later.")
+                    raise ValueError(
+                        f"Embedding service rejected the request ({status}). {reason}"
+                    ) from error
                 array = np.asarray(response, dtype=np.float64)
                 if array.shape != (len(batch), self.config.dimensions):
                     raise ValueError("Embedding response does not match the requested batch.")
