@@ -16,7 +16,7 @@ from emporio_agent.agent import (
     run_chat,
 )
 from emporio_agent.config import Settings
-from emporio_agent.runtime import StoreRuntime
+from emporio_agent.runtime import Snapshot, StoreRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -67,29 +67,13 @@ def _render_chat(agent: Agent, tools: StoreTools, token: str) -> None:
         st.error("The request could not be completed. Please try again.")
 
 
-def render(
-    settings: Settings | None = None,
-    *,
-    runtime_factory: Callable[[Settings], StoreRuntime] = _runtime,
-    transport_factory: Callable[[], httpx2.BaseTransport] | None = None,
-) -> None:
-    """Render the chat with narrow dependency injection available only to Python tests.
-
-    Parameters:
-        settings: Optional settings for isolated app tests.
-        runtime_factory: Source-generation factory, shared independently of conversation state.
-        transport_factory: Test-only native HTTP transport; no production UI switch exists.
-    """
+def _render_page() -> str:
+    """Initialize the page and conversation controls, returning its private identifier."""
     st.set_page_config(page_title="Empório da Música | Store support", page_icon="🎵")
     st.title("Empório da Música")
     st.caption(
         "Your music starts here. Ask about instruments, store policies or an existing order."
     )
-    try:
-        active = settings or Settings.from_env()
-    except ValueError as error:
-        st.error(str(error))
-        return
     candidate = st.query_params.get("conversation")
     token = conversation_token(candidate)
     if candidate != token:
@@ -102,13 +86,16 @@ def render(
         st.caption("Bookmark this page to return. Keep the conversation link private.")
         st.caption("Order lookup requires an order number and the email used for that order.")
         st.caption("Information comes from the supplied store files. No purchases are made here.")
-    if not active.anthropic_key:
-        st.info("Chat is not configured yet. Set ANTHROPIC_API_KEY in the server environment.")
-        st.chat_input("Ask the store a question", disabled=True)
-        return
+    return token
+
+
+def _prepare_store(
+    settings: Settings, runtime_factory: Callable[[Settings], StoreRuntime]
+) -> Snapshot | None:
+    """Load a valid source snapshot and show its availability or a preparation error."""
     try:
         with st.status("Checking store information…", expanded=False) as status:
-            runtime = runtime_factory(active)
+            runtime = runtime_factory(settings)
             snapshot = runtime.refresh()
             status.update(label="Store information is ready", state="complete")
     except Exception as error:
@@ -117,15 +104,24 @@ def render(
             st.error(str(error))
         else:
             st.error("Store sources could not be loaded. Please check configuration and try again.")
-        st.chat_input("Ask the store a question", disabled=True)
-        return
+        return None
     with st.sidebar.expander("Available information"):
         for name, available in snapshot.capabilities().items():
             st.write(f"{name.capitalize()}: {'available' if available else 'not supplied'}")
         st.caption(f"{len(snapshot.catalog.sources)} source files in the current snapshot.")
+    return snapshot
+
+
+def _serve_conversation(
+    settings: Settings,
+    snapshot: Snapshot,
+    token: str,
+    transport_factory: Callable[[], httpx2.BaseTransport] | None,
+) -> None:
+    """Own one agent's initialization, chat handling and resource cleanup."""
     try:
         agent, tools = build_agent(
-            active,
+            settings,
             snapshot,
             token,
             transport=transport_factory() if transport_factory is not None else None,
@@ -138,6 +134,37 @@ def render(
         _render_chat(agent, tools, token)
     finally:
         close_agent(agent)
+
+
+def render(
+    settings: Settings | None = None,
+    *,
+    runtime_factory: Callable[[Settings], StoreRuntime] = _runtime,
+    transport_factory: Callable[[], httpx2.BaseTransport] | None = None,
+) -> None:
+    """Compose the page, store preparation and conversation lifecycle.
+
+    Parameters:
+        settings: Optional settings for isolated app tests.
+        runtime_factory: Shared source runtime, independent of conversation state.
+        transport_factory: Test-only HTTP transport; no production UI switch exists.
+    """
+    token = _render_page()
+    try:
+        active = settings or Settings.from_env()
+    except ValueError as error:
+        st.error(str(error))
+        st.chat_input("Ask the store a question", disabled=True)
+        return
+    if not active.anthropic_key:
+        st.info("Chat is not configured yet. Set ANTHROPIC_API_KEY in the server environment.")
+        st.chat_input("Ask the store a question", disabled=True)
+        return
+    snapshot = _prepare_store(active, runtime_factory)
+    if snapshot is None:
+        st.chat_input("Ask the store a question", disabled=True)
+        return
+    _serve_conversation(active, snapshot, token, transport_factory)
 
 
 if __name__ == "__main__":

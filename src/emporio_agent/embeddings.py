@@ -14,6 +14,19 @@ import numpy as np
 from huggingface_hub.errors import HfHubHTTPError, InferenceTimeoutError
 from tokenizers import Tokenizer
 
+DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_TOKENIZER_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+DEFAULT_QUERY_PREFIX = (
+    "Instruct: Given a question about store policies, retrieve relevant passages that answer it.\n"
+    "Query:"
+)
+
+
+def _prefixed(text: str, prefix: str) -> str:
+    if not text.strip():
+        raise ValueError("Embedding input cannot be empty.")
+    return f"{prefix} {text}" if prefix else text
+
 
 class TextTokenizer(Protocol):
     """Count and split text without silently truncating it."""
@@ -33,7 +46,7 @@ class TextTokenizer(Protocol):
 
 
 class ModelTokenizer:
-    """Use the baked tokenizer without loading an embedding model locally."""
+    """Use the configured tokenizer without loading an embedding model locally."""
 
     def __init__(self, tokenizer: Tokenizer) -> None:
         self._tokenizer = tokenizer
@@ -113,17 +126,23 @@ class FeatureExtractionClient(Protocol):
 class EmbeddingConfig:
     """Keep model, dimensions and query formatting in the cache identity."""
 
-    model: str = "Qwen/Qwen3-Embedding-0.6B"
+    model: str = DEFAULT_EMBEDDING_MODEL
     provider: str = "deepinfra"
     dimensions: int = 1024
-    instruction: str = (
-        "Given a question about store policies, retrieve relevant passages that answer it."
-    )
+    query_prefix: str = DEFAULT_QUERY_PREFIX
+    document_prefix: str = ""
 
     @property
     def fingerprint(self) -> str:
         """Identify a vector space and its preprocessing configuration."""
-        payload = (self.model, self.provider, self.dimensions, self.instruction, "l2-v1")
+        payload = (
+            self.model,
+            self.provider,
+            self.dimensions,
+            self.query_prefix,
+            self.document_prefix,
+            "l2-v2",
+        )
         return sha256(json.dumps(payload).encode()).hexdigest()
 
 
@@ -154,13 +173,12 @@ class HFEmbedder:
         return self.config.fingerprint
 
     def embed_documents(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        """Embed policy passages without the query-only retrieval instruction."""
-        return self._embed(list(texts))
+        """Format policy passages with the configured document prefix."""
+        return self._embed([_prefixed(text, self.config.document_prefix) for text in texts])
 
     def embed_query(self, query: str) -> tuple[float, ...]:
-        """Apply the Qwen retrieval instruction to the query only."""
-        prepared = f"Instruct: {self.config.instruction}\nQuery: {query}"
-        return self._embed([prepared])[0]
+        """Format the retrieval query using the configured model's prefix."""
+        return self._embed([_prefixed(query, self.config.query_prefix)])[0]
 
     def _vector(self, raw: object) -> tuple[float, ...]:
         array = np.asarray(raw, dtype=np.float64)
@@ -172,8 +190,6 @@ class HFEmbedder:
         return tuple(float(value) for value in array / norm)
 
     def _embed(self, texts: list[str]) -> list[tuple[float, ...]]:
-        if any(not text.strip() for text in texts):
-            raise ValueError("Embedding input cannot be empty.")
         if not texts:
             return []
         keys = [sha256((self.fingerprint + text).encode()).hexdigest() for text in texts]

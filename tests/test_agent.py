@@ -1,9 +1,11 @@
 """Exercise the native Agno/Anthropic loop with real tools and durable sessions."""
 
+import json
 import sqlite3
 from collections.abc import Generator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -171,6 +173,37 @@ def _additional_input(agent: Agent) -> list[object]:
     """Narrow an upstream field whose third-party dictionary annotation is untyped."""
     value = cast(list[object] | None, getattr(agent, "additional_input"))
     return value or []
+
+
+def test_deployment_settings_reach_native_sdk_and_store_context(tmp_path: Path) -> None:
+    """Apply configured model limits, HTTP timeout and store time zone to the real agent."""
+    settings = replace(
+        _settings(tmp_path),
+        model="configured-claude-model",
+        claude_timeout_seconds=12.5,
+        max_output_tokens=777,
+        max_tool_calls=4,
+        store_timezone="Asia/Tokyo",
+    )
+    with _agent(settings, small_snapshot(), conversation_token(), [text_response("Hello.")]) as (
+        agent,
+        _,
+        stub,
+    ):
+        assert agent.tool_call_limit == 4
+        model = agent.model
+        assert isinstance(model, Claude) and model.client is not None
+        client = cast(httpx2.Client, getattr(model.client, "_client"))
+        assert client.timeout.read == 12.5
+        context = _additional_input(agent)[-1]
+        assert isinstance(context, Message) and isinstance(context.content, str)
+        payload = cast(dict[str, object], json.loads(context.content))
+        timestamp = payload["store_local_time"]
+        assert isinstance(timestamp, str)
+        assert datetime.fromisoformat(timestamp).utcoffset() == timedelta(hours=9)
+        assert run_chat(agent, "Hi") == "Hello."
+        assert stub.requests[0]["model"] == "configured-claude-model"
+        assert stub.requests[0]["max_tokens"] == 777
 
 
 def test_native_tool_loop_and_sdk_configuration(tmp_path: Path) -> None:

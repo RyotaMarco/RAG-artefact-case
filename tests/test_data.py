@@ -15,6 +15,18 @@ from emporio_agent.data import (
     write_catalog,
 )
 
+_PRODUCT_ROW = {
+    "product_id": "1",
+    "price_brl": "10.00",
+    "name": "Demo Guitar",
+    "category_id": "1",
+    "description": "An instrument",
+    "stock_quantity": "2",
+    "status": "active",
+    "specs": "{}",
+    "created_at": "2026-01-01",
+}
+
 
 def _source(name: str, text: str) -> SourceFile:
     content = text.encode("utf-8")
@@ -36,6 +48,80 @@ def test_arbitrary_shard_counts_and_header_order(count: int) -> None:
     assert len(first.tables["categories"].rows) == count
     assert first.fingerprint == second.fingerprint
     assert first.tables == second.tables
+
+
+@pytest.mark.parametrize(
+    ("role", "row", "extra"),
+    [
+        ("products", _PRODUCT_ROW, "phone"),
+        ("products", _PRODUCT_ROW, "custom_field"),
+        (
+            "customers",
+            {
+                "customer_id": "7",
+                "name": "Demo Buyer",
+                "phone": "000",
+                "email": "buyer@example.test",
+                "city": "Example City",
+            },
+            "description",
+        ),
+        ("categories", {"category_id": "1", "name": "Guitars", "description": "Group"}, "phone"),
+    ],
+)
+def test_complete_schemas_ignore_unselected_extra_columns(
+    role: str, row: dict[str, str], extra: str
+) -> None:
+    """Recognize complete roles while keeping both known and unknown extras unexposed."""
+    export = {extra: "Ignored metadata", **row}
+    headers = tuple(reversed(export))
+    text = ",".join(headers) + "\n" + ",".join(export[column] for column in headers) + "\n"
+    catalog = build_catalog((_source("renamed-export.csv", text),))
+    assert set(catalog.tables) == {role}
+    table = catalog.tables[role]
+    assert extra not in table.columns
+    assert extra not in table.rows[0]
+    assert table.rows[0]["name"] == row["name"]
+    assert len(table.columns) == len(row) + (1 if role == "products" else 0)
+
+
+@pytest.mark.parametrize("missing", tuple(_PRODUCT_ROW))
+def test_each_missing_product_column_prevents_category_fallback(missing: str) -> None:
+    """Reject incomplete products even when their surviving columns contain a full category."""
+    export = {column: value for column, value in _PRODUCT_ROW.items() if column != missing}
+    text = ",".join(export) + "\n" + ",".join(export.values()) + "\n"
+    with pytest.raises(DataError, match="supported business schema"):
+        build_catalog((_source("incomplete-products.csv", text),))
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_independent_complete_schemas_are_ambiguous_regardless_of_size(reverse: bool) -> None:
+    """A wider product export must not win over a separate complete customer schema."""
+    export = {
+        **_PRODUCT_ROW,
+        "customer_id": "7",
+        "phone": "000",
+        "email": "buyer@example.test",
+        "city": "Example City",
+    }
+    headers = tuple(reversed(export)) if reverse else tuple(export)
+    text = ",".join(headers) + "\n" + ",".join(export[column] for column in headers) + "\n"
+    with pytest.raises(DataError, match="supported business schema"):
+        build_catalog((_source("mixed-business-roles.csv", text),))
+
+
+def test_ignored_shard_metadata_does_not_change_record_identity_or_hide_conflicts() -> None:
+    """Discard extras consistently while retaining business-key deduplication and conflicts."""
+    headers = ",".join((*_PRODUCT_ROW, "phone")) + "\n"
+    values = ",".join(_PRODUCT_ROW.values())
+    first = _source("first.csv", headers + values + ",111\n")
+    second = _source("second.csv", headers + values + ",222\n")
+    catalog = build_catalog((first, second))
+    assert len(catalog.tables["products"].rows) == 1
+    assert "phone" not in catalog.tables["products"].columns
+    changed = _source("changed.csv", headers + values.replace("10.00", "11.00") + ",222\n")
+    with pytest.raises(DataError, match="Conflicting primary key"):
+        build_catalog((first, changed))
 
 
 def test_added_changed_removed_files_replace_snapshot() -> None:

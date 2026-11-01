@@ -12,7 +12,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
-from emporio_agent.documents import build_index
+from emporio_agent.documents import ChunkConfig, build_index
 from emporio_agent.policies import extract_rules
 from emporio_agent.runtime import Snapshot
 
@@ -144,6 +144,66 @@ def test_oversized_paragraph_preserves_tail_in_bounded_chunks() -> None:
     assert len(index.chunks) > 1
     assert all(len(chunk.text) <= 800 for chunk in index.chunks)
     assert any("final exception" in chunk.text for chunk in index.chunks)
+
+
+@pytest.mark.parametrize("overlap", [0, 20])
+def test_custom_equal_target_and_max_preserve_complete_pdf_text(overlap: int) -> None:
+    """Reserve overlap inside a small model window without truncating source sections."""
+    body = "".join(f"policy{number:04d}" for number in range(150)) + " final exception"
+    title = "1. A detailed payment policy heading exceeding the smaller heading budget"
+    source = Source("small-window.pdf", pdf_bytes([title, body]))
+    config = ChunkConfig(target_tokens=96, max_tokens=96, overlap_tokens=overlap)
+    index = build_index([source], FakeEmbedder(), CharacterTokenizer(), chunking=config)
+
+    assert len(index.chunks) > 1
+    assert all(len(chunk.text) <= config.max_tokens for chunk in index.chunks)
+    assert any("final exception" in chunk.text.replace("\n\n", "") for chunk in index.chunks)
+    assert index.sections[0].title == title
+    assert index.sections[0].text == body
+    assert all(chunk.citations[0].section == title for chunk in index.chunks)
+    assert all(chunk.citations[0].pages == (1,) for chunk in index.chunks)
+    if overlap == 0:
+        restored = "".join(chunk.text.split("\n\n", 1)[1] for chunk in index.chunks)
+        assert restored.replace("\n\n", "") == body
+
+
+@pytest.mark.parametrize(
+    ("target", "maximum", "overlap"), [(0, 800, 0), (600, 800, -1), (600, 800, 600), (801, 800, 80)]
+)
+def test_invalid_chunk_limit_relationships_fail_on_construction(
+    target: int, maximum: int, overlap: int
+) -> None:
+    """Validate the complete relationship once before any PDF or provider work."""
+    with pytest.raises(ValueError, match="overlap_tokens < target_tokens <= max_tokens"):
+        ChunkConfig(target_tokens=target, max_tokens=maximum, overlap_tokens=overlap)
+
+
+def test_chunk_limits_with_no_room_for_policy_text_fail_clearly() -> None:
+    """An extreme overlap must not reach a splitter with a zero or negative window."""
+    source = Source("too-small.pdf", pdf_bytes(["1. Payments", "A complete policy."]))
+    config = ChunkConfig(target_tokens=20, max_tokens=20, overlap_tokens=19)
+    with pytest.raises(ValueError, match="no token room"):
+        build_index([source], FakeEmbedder(), CharacterTokenizer(), chunking=config)
+
+
+def test_chunk_limit_changes_invalidate_index_even_for_identical_short_passages() -> None:
+    """Include every chunk setting in metadata identity independently of source length."""
+    source = Source("payments.pdf", pdf_bytes(["1. Payments", "PIX has a discount."]))
+    configs = (
+        ChunkConfig(),
+        ChunkConfig(target_tokens=500),
+        ChunkConfig(max_tokens=900),
+        ChunkConfig(overlap_tokens=0),
+    )
+    indexes = [
+        build_index([source], FakeEmbedder(), CharacterTokenizer(), chunking=config)
+        for config in configs
+    ]
+    assert len({config.fingerprint for config in configs}) == len(configs)
+    assert len({index.fingerprint for index in indexes}) == len(configs)
+    assert all(index.chunks == indexes[0].chunks for index in indexes)
+    default_index = build_index([source], FakeEmbedder(), CharacterTokenizer())
+    assert default_index.fingerprint == indexes[0].fingerprint
 
 
 def test_actual_manual_layout_and_page_citations() -> None:

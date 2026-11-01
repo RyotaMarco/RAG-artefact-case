@@ -37,6 +37,27 @@ class PDFSource(Protocol):
 
 
 @dataclass(frozen=True)
+class ChunkConfig:
+    """Keep validated passage limits in the policy index identity."""
+
+    target_tokens: int = 600
+    max_tokens: int = 800
+    overlap_tokens: int = 80
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.overlap_tokens < self.target_tokens <= self.max_tokens:
+            raise ValueError(
+                "Chunk limits must satisfy 0 <= overlap_tokens < target_tokens <= max_tokens."
+            )
+
+    @property
+    def fingerprint(self) -> str:
+        """Invalidate cached passages when any token limit changes."""
+        limits = (self.target_tokens, self.max_tokens, self.overlap_tokens)
+        return sha256(json.dumps(limits).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
 class Citation:
     """Identify the original document, page span and policy section."""
 
@@ -148,20 +169,46 @@ def _extract(source: PDFSource) -> list[tuple[str, list[tuple[int, str]]]]:
     return sections
 
 
-def _chunks(
-    title: str, paragraphs: list[tuple[int, str]], source: str, tokenizer: TextTokenizer
-) -> list[PolicyChunk]:
+def _chunk_parts(
+    title: str,
+    paragraphs: list[tuple[int, str]],
+    tokenizer: TextTokenizer,
+    chunking: ChunkConfig,
+) -> tuple[str, list[tuple[int, str]]]:
+    """Fit the heading and paragraph spans while reserving room for carried overlap."""
     heading = title
-    if tokenizer.count(heading) > 120:
-        heading = tokenizer.split(heading, 120, 0)[0]
+    heading_limit = min(120, chunking.target_tokens // 4)
+    if heading_limit <= 0:
+        raise ValueError("Chunk target leaves no token room for a heading and policy text.")
+    if tokenizer.count(heading) > heading_limit:
+        heading = tokenizer.split(heading, heading_limit, 0)[0]
     prefix = heading + "\n\n"
-    allowance = 600 - tokenizer.count(prefix) - 8
+    prefix_tokens = tokenizer.count(prefix)
+    allowance = min(
+        chunking.target_tokens - prefix_tokens - 8,
+        chunking.max_tokens - prefix_tokens - chunking.overlap_tokens - 8,
+    )
+    if allowance <= 0:
+        raise ValueError(
+            "Chunk limits leave no token room for policy text after heading and overlap."
+        )
     parts: list[tuple[int, str]] = []
     for page, paragraph in paragraphs:
         if tokenizer.count(paragraph) <= allowance:
             parts.append((page, paragraph))
         else:
             parts.extend((page, text) for text in tokenizer.split(paragraph, allowance, 0))
+    return prefix, parts
+
+
+def _chunks(
+    title: str,
+    paragraphs: list[tuple[int, str]],
+    source: str,
+    tokenizer: TextTokenizer,
+    chunking: ChunkConfig,
+) -> list[PolicyChunk]:
+    prefix, parts = _chunk_parts(title, paragraphs, tokenizer, chunking)
     result: list[PolicyChunk] = []
     body: list[str] = []
     page_numbers: set[int] = set()
@@ -170,12 +217,16 @@ def _chunks(
     def emit(keep_overlap: bool = False) -> None:
         if body:
             text = prefix + "\n\n".join(body)
-            if tokenizer.count(text) > 800:
-                raise ValueError("Chunk exceeds the configured 800-token limit.")
+            if tokenizer.count(text) > chunking.max_tokens:
+                raise ValueError("Chunk exceeds the configured max_tokens limit.")
             result.append(
                 PolicyChunk(text, (Citation(source, tuple(sorted(page_numbers)), title),))
             )
-            tail = tokenizer.split(body[-1], 80, 0)[-1] if keep_overlap else None
+            tail = (
+                tokenizer.split(body[-1], chunking.overlap_tokens, 0)[-1]
+                if keep_overlap and chunking.overlap_tokens
+                else None
+            )
             body.clear()
             page_numbers.clear()
             if tail:
@@ -184,7 +235,7 @@ def _chunks(
 
     for page, text in parts:
         candidate = prefix + "\n\n".join([*body, text])
-        if body and tokenizer.count(candidate) > 600:
+        if body and tokenizer.count(candidate) > chunking.target_tokens:
             emit(keep_overlap=True)
         body.append(text)
         page_numbers.add(page)
@@ -249,9 +300,14 @@ class PolicyIndex:
 
 
 def build_index(
-    sources: Sequence[PDFSource], embedder: Embedder, tokenizer: TextTokenizer
+    sources: Sequence[PDFSource],
+    embedder: Embedder,
+    tokenizer: TextTokenizer,
+    *,
+    chunking: ChunkConfig | None = None,
 ) -> PolicyIndex:
     """Rebuild from the complete active PDF inventory, including deletions and renames."""
+    limits = chunking or ChunkConfig()
     pdfs = sorted(
         (source for source in sources if source.relative_path.casefold().endswith(".pdf")),
         key=lambda source: source.relative_path,
@@ -273,7 +329,7 @@ def build_index(
                     (Citation(source.relative_path, pages, title),),
                 )
             )
-            for chunk in _chunks(title, paragraphs, source.relative_path, tokenizer):
+            for chunk in _chunks(title, paragraphs, source.relative_path, tokenizer, limits):
                 key = sha256(" ".join(chunk.text.split()).encode()).hexdigest()
                 previous = unique.get(key)
                 if previous is None:
@@ -288,7 +344,8 @@ def build_index(
                 inventory,
                 embedder.fingerprint,
                 tokenizer.fingerprint,
-                "layout-sections-v1-600-800-80",
+                "layout-sections-v2",
+                limits.fingerprint,
             )
         ).encode()
     ).hexdigest()

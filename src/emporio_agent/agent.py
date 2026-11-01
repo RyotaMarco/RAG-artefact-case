@@ -325,12 +325,12 @@ def build_agent(
     database = settings.runtime_dir / "sessions.sqlite3"
     access = ConversationAccess(database, token, snapshot.generation_id)
     tools = StoreTools(snapshot, access)
-    http_client = httpx2.Client(transport=transport, timeout=60)
+    http_client = httpx2.Client(transport=transport, timeout=settings.claude_timeout_seconds)
     model = Claude(
         id=settings.model,
         api_key=settings.anthropic_key,
         client=Anthropic(api_key=settings.anthropic_key, http_client=http_client, max_retries=1),
-        max_tokens=1024,
+        max_tokens=settings.max_output_tokens,
         thinking={"type": "between_tools"},
         output_config={"effort": "low"},
         cache_system_prompt=True,
@@ -347,12 +347,12 @@ def build_agent(
         add_history_to_context=False,
         tools=[tools.search_policies, tools.verify_order, tools.query_data, tools.calculate_quote],
         instructions=INSTRUCTIONS,
-        tool_call_limit=6,
+        tool_call_limit=settings.max_tool_calls,
         markdown=True,
         telemetry=False,
     )
     context = {
-        "store_local_time": datetime.now(ZoneInfo("America/Campo_Grande")).isoformat(),
+        "store_local_time": datetime.now(ZoneInfo(settings.store_timezone)).isoformat(),
         "capabilities": snapshot.capabilities(),
         "schema": snapshot.catalog.describe(),
         "verified_order_id": access.verified_order(),
