@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
+import httpx2
 import pytest
 from agent_fixtures import (
     ClaudeStub,
@@ -30,6 +31,24 @@ from emporio_agent.agent import (
 )
 from emporio_agent.config import Settings
 from emporio_agent.runtime import Snapshot
+
+
+def test_provider_failure_is_not_presented_as_a_completed_answer(tmp_path: Path) -> None:
+    """Agno error RunOutputs must become a controlled UI error and stay out of history."""
+
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("Fixture network failure", request=request)
+
+    token = conversation_token()
+    agent, _ = build_agent(
+        _settings(tmp_path), small_snapshot(), token, transport=httpx2.MockTransport(fail)
+    )
+    try:
+        with pytest.raises(ValueError, match="did not complete"):
+            run_chat(agent, "Hello")
+        assert chat_messages(agent, token) == []
+    finally:
+        close_agent(agent)
 
 
 def _settings(tmp_path: Path) -> Settings:

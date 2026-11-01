@@ -16,6 +16,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.anthropic import Claude
 from agno.models.message import Message
+from agno.run.base import RunStatus
 from anthropic import Anthropic
 
 from emporio_agent.config import Settings
@@ -387,6 +388,8 @@ def run_chat(agent: Agent, question: str) -> str:
         raise ValueError("Please enter a question containing between 1 and 8000 characters.")
     # Agno's overload includes unparameterized containers; this call has a concrete string input.
     result = agent.run(question, stream=False)  # pyright: ignore[reportUnknownMemberType]
+    if result.status != RunStatus.completed:
+        raise ValueError("The model request did not complete. Please try again.")
     content: object = result.content
     if not isinstance(content, str) or not content.strip():
         raise ValueError("The model returned no final text. Please try again.")
