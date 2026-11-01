@@ -38,18 +38,18 @@ class ExactSum:
             self.total += check_cents(value)
             self.count += 1
 
-    def finalize(self) -> int:
+    def finalize(self) -> int | None:
         """Return an exact signed-64-bit total or SQL NULL for no inputs."""
-        return check_cents(self.total)
+        return check_cents(self.total) if self.count else None
 
 
 class ExactAverage(ExactSum):
     """Average cents exactly and round once to cents using HALF_UP."""
 
-    def finalize(self) -> int:
+    def finalize(self) -> int | None:
         """Use an integer quotient and remainder, avoiding a repeating decimal intermediate."""
         if not self.count:
-            return 0
+            return None
         quotient, remainder = divmod(self.total, self.count)
         return check_cents(quotient + (remainder * 2 >= self.count))
 
@@ -68,8 +68,9 @@ def _run(payload: dict[str, object]) -> dict[str, object]:
                 [tuple(row[column] for column in columns) for row in rows],
             )
         connection.commit()
-        connection.create_aggregate("exact_sum", 1, ExactSum)
-        connection.create_aggregate("exact_avg", 1, ExactAverage)
+        # SQLite accepts NULL here; its bundled typing stub incorrectly requires an int.
+        connection.create_aggregate("exact_sum", 1, ExactSum)  # pyright: ignore[reportArgumentType]
+        connection.create_aggregate("exact_avg", 1, ExactAverage)  # pyright: ignore[reportArgumentType]
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65_536)

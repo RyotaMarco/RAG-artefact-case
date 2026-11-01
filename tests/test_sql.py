@@ -19,6 +19,101 @@ def _engine() -> QueryEngine:
     return QueryEngine(build_catalog(discover_sources(Path(__file__).parents[1] / "data")))
 
 
+def _join_engine() -> QueryEngine:
+    sources = (
+        _source(
+            "groups.csv",
+            "category_id,name,description\n1,Guitars,Instruments\n2,Other,Empty group\n",
+        ),
+        _source(
+            "instruments.csv",
+            "product_id,price_brl,name,category_id,description,stock_quantity,status,specs,created_at\n"
+            "10,10.01,First,1,Description,1,active,{},2026-01-01\n"
+            "11,20.02,Second,1,Description,1,active,{},2026-01-01\n",
+        ),
+        _source(
+            "offers.csv",
+            "promotion_id,product_id,discount_percent,description,is_active\n101,10,5,Offer,true\n",
+        ),
+        _source(
+            "purchases.csv",
+            "order_id,customer_id,order_date,status,total_brl,payment_method,tracking_code,estimated_delivery,notes\n"
+            "501,5,2026-01-01,shipped,10.01,pix,,,Private first\n"
+            "502,6,2026-01-01,pending,20.02,pix,,,Private second\n",
+        ),
+        _source("lines.csv", "order_id,quantity,product_id\n501,1,10\n502,1,11\n"),
+    )
+    return QueryEngine(build_catalog(sources))
+
+
+def test_known_keys_support_inner_left_and_multiple_joins() -> None:
+    """Traverse public foreign keys in either direction without inventing relationships."""
+    engine = _join_engine()
+    result = engine.query(
+        "SELECT p.product_id, c.name, m.discount_percent FROM products p "
+        "INNER JOIN categories c ON c.category_id = p.category_id "
+        "LEFT JOIN promotions m ON (p.product_id = m.product_id) ORDER BY p.product_id"
+    )
+    assert result.rows == ((10, "Guitars", "5"), (11, "Guitars", None))
+    assert engine.query(
+        "SELECT c.category_id, p.product_id FROM categories c "
+        "LEFT OUTER JOIN products p ON c.category_id = p.category_id "
+        "ORDER BY c.category_id, p.product_id"
+    ).rows == ((1, 10), (1, 11), (2, None))
+
+
+def test_verified_order_joins_keep_private_rows_scoped() -> None:
+    """Known joins retain the server-selected order subset across public product lookups."""
+    result = _join_engine().query(
+        "SELECT o.order_id, p.name, c.name AS category FROM orders o "
+        "JOIN order_items i ON i.order_id = o.order_id "
+        "JOIN products p ON p.product_id = i.product_id "
+        "JOIN categories c ON p.category_id = c.category_id",
+        verified_order_id=501,
+    )
+    assert result.rows == ((501, "First", "Guitars"),)
+
+
+@pytest.mark.parametrize(
+    "join",
+    [
+        ", categories c WHERE p.category_id = c.category_id",
+        "CROSS JOIN categories c",
+        "CROSS JOIN categories c ON p.category_id = c.category_id",
+        "JOIN categories c",
+        "JOIN categories c ON 1 = 1",
+        "JOIN categories c ON p.product_id = c.category_id",
+        "JOIN categories c ON p.category_id = p.category_id",
+        "JOIN categories c ON p.category_id = c.category_id OR 1 = 1",
+        "JOIN categories c ON p.category_id = c.category_id AND p.status = 'active'",
+        "JOIN products q ON p.product_id = q.product_id",
+        "NATURAL JOIN categories c",
+        "JOIN categories c USING (category_id)",
+        "RIGHT JOIN categories c ON p.category_id = c.category_id",
+        "FULL JOIN categories c ON p.category_id = c.category_id",
+        "JOIN categories c ON p.product_id = m.product_id "
+        "JOIN promotions m ON p.product_id = m.product_id",
+        "JOIN order_items i ON p.product_id = i.product_id "
+        "JOIN promotions m ON i.product_id = m.product_id",
+    ],
+)
+def test_cartesian_nonkey_and_unsupported_joins_are_rejected(join: str) -> None:
+    """Reject fan-out caused by missing keys, guessed keys, or disconnected new aliases."""
+    with pytest.raises(QueryError):
+        _join_engine().query(f"SELECT p.product_id FROM products p {join}", verified_order_id=501)
+
+
+def test_all_null_left_join_money_aggregates_remain_sql_null() -> None:
+    """Unmatched rows distinguish unknown money from an actual zero sum or average."""
+    result = _join_engine().query(
+        "SELECT c.category_id, SUM(p.price_cents) AS total, AVG(p.price_cents) AS mean "
+        "FROM categories c LEFT JOIN products p ON c.category_id = p.category_id "
+        "GROUP BY c.category_id ORDER BY c.category_id"
+    )
+    assert result.rows == ((1, 3003, 1502), (2, None, None))
+    assert result.as_dict()["rows"] == [[1, "BRL 30.03", "BRL 15.02"], [2, None, None]]
+
+
 def test_catalog_query_has_exact_money_and_provenance() -> None:
     """Return ready-to-use BRL display values without asking an LLM to divide cents."""
     result = _engine().query("SELECT name, price_cents FROM products WHERE product_id = 95")
