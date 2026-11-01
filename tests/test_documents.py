@@ -6,10 +6,15 @@ from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
+import pytest
+from agent_fixtures import small_snapshot
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
+from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import build_index
+from emporio_agent.policies import extract_rules
+from emporio_agent.runtime import Snapshot
 
 
 @dataclass(frozen=True)
@@ -179,3 +184,65 @@ def test_repeated_headers_are_detected_by_position_not_shop_wording() -> None:
     )
     assert not any("Another company's" in chunk.text for chunk in index.chunks)
     assert sum("Useful repeated body statement." in item.text for item in index.sections) == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "body"),
+    [
+        ("debit", "Cartao de Debito Pagamento a vista Nao aceitamos esta forma de pagamento."),
+        ("boleto", "Boleto Bancario Pagamento a vista Nao disponivel para novas compras."),
+    ],
+)
+def test_pdf_payment_denial_reaches_the_quote_tool_as_an_error(
+    tmp_path: Path, method: str, body: str
+) -> None:
+    """Exercise real PDF extraction through source rules and the actual application tool."""
+    source = Source("payments.pdf", pdf_bytes(["3. Formas de Pagamento", body]))
+    index = build_index([source], FakeEmbedder(), CharacterTokenizer())
+    original = small_snapshot(price_cents=10000)
+    snapshot = Snapshot("denied-method", original.catalog, index, extract_rules(index.sections))
+    access = ConversationAccess(
+        tmp_path / "sessions.sqlite3", conversation_token(), "denied-method"
+    )
+    result = StoreTools(snapshot, access).calculate_quote(101, payment_method=method)
+    assert "error" in result
+    assert "total" not in result
+
+
+def test_sections_continue_across_pages_without_losing_the_final_paragraph() -> None:
+    """Keep section grouping and page evidence when page furniture is filtered separately."""
+    writer = PdfWriter()
+    for lines in (
+        [
+            "Company handbook",
+            "",
+            "1. Payments",
+            "PIX has a discount.",
+            "",
+            "Page one exception.",
+            "Page 1",
+        ],
+        [
+            "Company handbook",
+            "",
+            "Continuation on page two.",
+            "",
+            "2. Returns",
+            "The final return condition.",
+            "Page 2",
+        ],
+    ):
+        writer.append(BytesIO(pdf_bytes(lines)))
+    output = BytesIO()
+    writer.write(output)
+    index = build_index(
+        [Source("spanning.pdf", output.getvalue())], FakeEmbedder(), CharacterTokenizer()
+    )
+    payments, returns = index.sections
+    assert payments.title == "1. Payments"
+    assert "Page one exception." in payments.text
+    assert "Continuation on page two." in payments.text
+    assert payments.citations[0].pages == (1, 2)
+    assert returns.title == "2. Returns"
+    assert returns.text == "The final return condition."
+    assert returns.citations[0].pages == (2,)
