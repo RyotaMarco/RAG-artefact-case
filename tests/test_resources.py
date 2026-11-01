@@ -120,13 +120,13 @@ def test_conversation_connections_close_and_verification_commits(
 def test_rejected_contact_and_generation_early_return_close_handles(
     tmp_path: Path, tracker: ResourceTracker
 ) -> None:
-    """Normal verification failures commit their counter and early returns still close."""
+    """Normal verification failures revoke access and early returns still close."""
     path = tmp_path / "sessions.sqlite3"
     token = conversation_token()
     access = ConversationAccess(path, token, "first")
     engine = QueryEngine(small_snapshot().catalog)
     assert not access.verify(engine, 501, "wrong@example.test")
-    assert _scalar(path, "SELECT failures FROM store_access") == 1
+    assert _scalar(path, "SELECT order_id FROM store_access") is None
     replacement = ConversationAccess(path, token, "replacement")
     assert not access.verify(engine, 501, "alex@example.test")
     assert replacement.verified_order() is None
@@ -144,7 +144,7 @@ def test_conversation_constructor_failure_rolls_back_and_closes(
         ConversationAccess(path, conversation_token(), "generation")
     _assert_closed(tracker)
     tracker.denied_action = None
-    assert _scalar(path, "SELECT COUNT(*) FROM store_access") == 0
+    assert _scalar(path, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'store_access'") == 0
     _assert_closed(tracker)
 
 
@@ -165,7 +165,6 @@ def test_verification_exception_rolls_back_and_closes(
         access.verify(engine, 501, "alex@example.test")
     _assert_closed(tracker)
     assert _scalar(path, "SELECT order_id FROM store_access") == 501
-    assert _scalar(path, "SELECT failures FROM store_access") == 0
     _assert_closed(tracker)
 
 

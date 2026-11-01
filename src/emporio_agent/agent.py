@@ -102,22 +102,25 @@ class ConversationAccess:
         self.identity = hashlib.sha256(token.encode()).hexdigest()
         self.generation = generation
         with closing(sqlite3.connect(database, timeout=10)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS store_access ("
-                "identity TEXT PRIMARY KEY, order_id INTEGER, failures INTEGER NOT NULL, "
+                "identity TEXT PRIMARY KEY, order_id INTEGER, "
                 "generation TEXT NOT NULL DEFAULT '') STRICT"
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(store_access)")}
+            if "failures" in columns:
+                connection.execute("ALTER TABLE store_access DROP COLUMN failures")
             if "generation" not in columns:
                 connection.execute(
                     "ALTER TABLE store_access ADD COLUMN generation TEXT NOT NULL DEFAULT ''"
                 )
             connection.execute(
-                "INSERT OR IGNORE INTO store_access VALUES (?, NULL, 0, ?)",
+                "INSERT OR IGNORE INTO store_access VALUES (?, NULL, ?)",
                 (self.identity, generation),
             )
             connection.execute(
-                "UPDATE store_access SET order_id = NULL, failures = 0, generation = ? "
+                "UPDATE store_access SET order_id = NULL, generation = ? "
                 "WHERE identity = ? AND generation != ?",
                 (generation, self.identity, generation),
             )
@@ -136,15 +139,14 @@ class ConversationAccess:
         with closing(sqlite3.connect(self.database, timeout=10)) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT failures, generation FROM store_access WHERE identity = ?", (self.identity,)
+                "SELECT generation FROM store_access WHERE identity = ?", (self.identity,)
             ).fetchone()
-            if row[1] != self.generation:
+            if row[0] != self.generation:
                 return False
-            failures = int(row[0])
-            wanted = engine.verify_order(order_id, email) if failures < 3 else None
+            wanted = engine.verify_order(order_id, email)
             connection.execute(
-                "UPDATE store_access SET order_id = ?, failures = ? WHERE identity = ?",
-                (wanted, 0 if wanted is not None else failures + 1, self.identity),
+                "UPDATE store_access SET order_id = ? WHERE identity = ?",
+                (wanted, self.identity),
             )
         return wanted is not None
 
