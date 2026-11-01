@@ -319,8 +319,40 @@ def _validate_nodes(query: exp.Select, aliases: Mapping[str, Table]) -> None:
                 raise QueryError("AVG is supported only for exact monetary columns.")
 
 
+def _is_percentage(expression: exp.Expr, aliases: Mapping[str, Table]) -> bool:
+    """Identify a percentage column or its exact MIN/MAX result before trusted rewriting."""
+    expression = _direct(expression)
+    if isinstance(expression, (exp.Min, exp.Max)):
+        expression = _direct(expression.this)
+    return (
+        isinstance(expression, exp.Column)
+        and _resolve_column(expression, aliases)[1] == "discount_percent"
+    )
+
+
+def _decimal_expression(expression: exp.Expr) -> exp.Collate:
+    """Restore TEXT affinity and exact numeric collation without converting through a float."""
+    return exp.Collate(
+        this=exp.Cast(this=expression.copy(), to=exp.DataType.build("TEXT")),
+        expression=exp.Var(this="exact_decimal"),
+    )
+
+
+def _normalize_percentages(query: exp.Select, aliases: Mapping[str, Table]) -> None:
+    """Restore exact comparison rules lost by aggregate results and IN right-hand operands."""
+    for predicate in list(query.find_all(exp.In)):
+        if not _is_percentage(predicate.this, aliases) and any(
+            _is_percentage(value, aliases) for value in predicate.expressions
+        ):
+            predicate.set("this", _decimal_expression(predicate.this))
+    for aggregate in list(query.find_all(exp.Min, exp.Max)):
+        if _is_percentage(aggregate, aliases):
+            aggregate.replace(_decimal_expression(aggregate))
+
+
 def _prepare_execution(query: exp.Select, aliases: Mapping[str, Table]) -> exp.Select:
     """Adapt validated monetary aggregates to exact worker functions and cap output rows."""
+    _normalize_percentages(query, aliases)
     for aggregate in list(query.find_all(exp.Sum, exp.Avg)):
         if _is_money(_direct(aggregate.this), aliases):
             replacement = exp.Anonymous(
