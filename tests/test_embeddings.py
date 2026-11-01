@@ -1,9 +1,13 @@
 """Verify hosted embedding caching, provider failures and response validation."""
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
-import httpx
+import httpx2
+import huggingface_hub.utils._http as hf_http
 import pytest
+from huggingface_hub import InferenceClient, set_client_factory
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -11,26 +15,55 @@ from tokenizers.pre_tokenizers import Whitespace
 from emporio_agent.embeddings import EmbeddingConfig, HFEmbedder, ModelTokenizer
 
 
-@pytest.mark.parametrize("status, expected", [(401, "HF_TOKEN"), (402, "credits"), (429, "limit")])
+@pytest.mark.parametrize(
+    "status, expected", [(401, "HF_TOKEN"), (402, "credits"), (429, "limit"), (None, "timed out")]
+)
 def test_provider_errors_are_actionable_without_exposing_response_secrets(
-    tmp_path: Path, status: int, expected: str
+    tmp_path: Path, status: int | None, expected: str
 ) -> None:
-    """Report a provider failure category without displaying its raw response body."""
+    """Translate actual HF SDK failures while all native HTTP stays inside a mock transport."""
+    attempts: list[httpx2.Request] = []
 
-    class RejectingClient(FakeClient):
-        def feature_extraction(
-            self, text: str | list[str], *, model: str, normalize: bool, truncate: bool
-        ) -> object:
-            """Fail only the controlled external provider boundary."""
-            response = httpx.Response(status, request=httpx.Request("POST", "https://example.test"))
-            raise httpx.HTTPStatusError(
-                "secret-provider-body", request=response.request, response=response
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET" and request.url.path == "/api/agent-harnesses":
+            return httpx2.Response(503)
+        if request.method == "GET" and request.url.path.startswith("/api/models/"):
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "Qwen/Qwen3-Embedding-0.6B",
+                    "inferenceProviderMapping": {
+                        "deepinfra": {
+                            "providerId": "Qwen/Qwen3-Embedding-0.6B",
+                            "status": "live",
+                            "task": "feature-extraction",
+                        }
+                    },
+                },
             )
+        assert request.method == "POST"
+        assert request.url.path == "/deepinfra/v1/openai/embeddings"
+        attempts.append(request)
+        if status is None:
+            raise httpx2.ReadTimeout("secret-provider-body", request=request)
+        return httpx2.Response(status, json={"error": "secret-provider-body"})
 
-    embedder = HFEmbedder(tmp_path / "vectors.sqlite3", client=RejectingClient())
-    with pytest.raises(ValueError, match=expected) as captured:
-        embedder.embed_query("payment methods")
-    assert "secret-provider-body" not in str(captured.value)
+    previous_factory = cast(Callable[[], httpx2.Client], getattr(hf_http, "_GLOBAL_CLIENT_FACTORY"))
+    transport = httpx2.MockTransport(respond)
+    native_client = httpx2.Client(transport=transport)
+    set_client_factory(lambda: native_client)
+    try:
+        embedder = HFEmbedder(
+            tmp_path / "vectors.sqlite3",
+            client=InferenceClient(provider="deepinfra", token="hf_fixture", timeout=30),
+        )
+        with pytest.raises(ValueError, match=expected) as captured:
+            embedder.embed_query("payment methods")
+        assert "secret-provider-body" not in str(captured.value)
+        assert len(attempts) == 1
+    finally:
+        set_client_factory(previous_factory)
+    assert native_client.is_closed
 
 
 class FakeClient:

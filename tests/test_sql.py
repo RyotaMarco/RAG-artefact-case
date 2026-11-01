@@ -1,6 +1,7 @@
 """Exercise the scoped SQL grammar, exact aggregates, and result/resource boundaries."""
 
 import hashlib
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,153 @@ def _source(name: str, text: str) -> SourceFile:
 
 def _engine() -> QueryEngine:
     return QueryEngine(build_catalog(discover_sources(Path(__file__).parents[1] / "data")))
+
+
+def _discount_engine() -> QueryEngine:
+    """Use rates whose numeric order differs from text order and binary float precision."""
+    rates = (
+        "5",
+        "8",
+        "10",
+        "40",
+        "7.000000000000000000000000000000000000001",
+        "7.000000000000000000000000000000000000002",
+    )
+    source = _source(
+        "offers.csv",
+        "promotion_id,product_id,discount_percent,description,is_active\n"
+        + "".join(f"{index},1,{rate},Offer,true\n" for index, rate in enumerate(rates, start=1)),
+    )
+    return QueryEngine(build_catalog((source,)))
+
+
+def test_original_discount_filters_use_numeric_order() -> None:
+    """Keep the original 10–40% promotions when filtering for discounts above five percent."""
+    engine = _engine()
+    expected = {
+        row["promotion_id"]
+        for row in engine.catalog.tables["promotions"].rows
+        if Decimal(str(row["discount_percent"])) > 5
+    }
+    result = engine.query("SELECT promotion_id FROM promotions WHERE discount_percent > 5")
+    assert {row[0] for row in result.rows} == expected
+    assert engine.query(
+        "SELECT discount_percent FROM promotions ORDER BY discount_percent DESC LIMIT 1"
+    ).rows == (("40",),)
+
+
+def test_percentage_ordering_extrema_and_fractional_bounds_stay_exact() -> None:
+    """Apply Decimal comparisons to filters, sorting, MIN/MAX, BETWEEN and IN."""
+    engine = _discount_engine()
+    smaller = "7.000000000000000000000000000000000000001"
+    larger = "7.000000000000000000000000000000000000002"
+    assert engine.query(
+        "SELECT discount_percent FROM promotions ORDER BY discount_percent DESC"
+    ).rows == (("40",), ("10",), ("8",), (larger,), (smaller,), ("5",))
+    assert engine.query(
+        "SELECT MIN(discount_percent), MAX(discount_percent) FROM promotions"
+    ).rows == (("5", "40"),)
+    assert engine.query(
+        f"SELECT promotion_id FROM promotions WHERE discount_percent > '{smaller}' "
+        "ORDER BY promotion_id"
+    ).rows == ((2,), (3,), (4,), (6,))
+    assert engine.query(
+        "SELECT promotion_id FROM promotions WHERE 5 < discount_percent ORDER BY promotion_id"
+    ).rows == ((2,), (3,), (4,), (5,), (6,))
+    assert engine.query(
+        f"SELECT promotion_id FROM promotions WHERE discount_percent BETWEEN '{smaller}' AND 10 "
+        "ORDER BY promotion_id"
+    ).rows == ((2,), (3,), (5,), (6,))
+    assert engine.query(
+        f"SELECT promotion_id FROM promotions WHERE discount_percent IN ('{smaller}')"
+    ).rows == ((5,),)
+
+
+@pytest.mark.parametrize(
+    ("predicate", "expected"),
+    [
+        ("MIN(discount_percent) > 10", ()),
+        ("MIN(discount_percent) < 10", (("5", "40"),)),
+        ("MIN(discount_percent) BETWEEN 0 AND 10", (("5", "40"),)),
+        ("MIN(discount_percent) IN (5, 8)", (("5", "40"),)),
+        ("5 IN (MIN(discount_percent))", (("5", "40"),)),
+        ("MAX(discount_percent) > 10", (("5", "40"),)),
+        ("MAX(discount_percent) < 10", ()),
+    ],
+)
+def test_percentage_aggregate_predicates_retain_exact_comparison(
+    predicate: str, expected: tuple[tuple[str, ...], ...]
+) -> None:
+    """Compare aggregate percentages numerically, preserving TEXT affinity in HAVING."""
+    result = _discount_engine().query(
+        f"SELECT MIN(discount_percent), MAX(discount_percent) FROM promotions HAVING {predicate}"
+    )
+    assert result.rows == expected
+
+
+def test_grouped_percentage_aggregate_ordering_retains_decimal_precision() -> None:
+    """Sort aggregate rates numerically, including fractions indistinguishable as floats."""
+    smaller = "7.000000000000000000000000000000000000001"
+    larger = "7.000000000000000000000000000000000000002"
+    result = _discount_engine().query(
+        "SELECT promotion_id, MAX(discount_percent) FROM promotions "
+        "GROUP BY promotion_id ORDER BY MAX(discount_percent) DESC"
+    )
+    assert result.rows == ((4, "40"), (3, "10"), (2, "8"), (6, larger), (5, smaller), (1, "5"))
+
+
+@pytest.mark.parametrize("value", ["5", "'5.0'"])
+def test_reverse_percentage_in_uses_decimal_equivalence(value: str) -> None:
+    """IN must not discard percentage collation when its column appears in the value list."""
+    assert _discount_engine().query(
+        f"SELECT promotion_id FROM promotions WHERE {value} IN (discount_percent)"
+    ).rows == ((1,),)
+
+
+def test_percentage_aggregate_wrappers_preserve_money_units_and_values() -> None:
+    """Trusted percentage normalization must not change neighboring exact monetary outputs."""
+    result = _join_engine().query(
+        "SELECT MIN(p.price_cents) AS minimum_price, MAX(m.discount_percent) AS maximum_rate "
+        "FROM products p JOIN promotions m ON p.product_id = m.product_id"
+    )
+    assert result.rows == ((1001, "5"),)
+    assert result.money_indexes == (0,)
+    assert result.as_dict()["rows"] == [["BRL 10.01", "5"]]
+
+
+@pytest.mark.parametrize(
+    "expression", ["CAST(discount_percent AS TEXT)", "discount_percent COLLATE exact_decimal"]
+)
+def test_percentage_normalization_does_not_allow_customer_cast_or_collation(
+    expression: str,
+) -> None:
+    """Only trusted post-validation rewriting may introduce casts and collations."""
+    with pytest.raises(QueryError, match="Only simple SELECT"):
+        _discount_engine().query(f"SELECT {expression} FROM promotions")
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "NaN", "Infinity", "-Infinity"])
+def test_invalid_percentage_comparison_values_are_controlled_errors(value: str) -> None:
+    """An invalid filter cannot silently fall back to lexical or nonfinite comparison."""
+    with pytest.raises(QueryError, match="finite decimal"):
+        _discount_engine().query(
+            f"SELECT promotion_id FROM promotions WHERE discount_percent > '{value}'"
+        )
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "LOWER(discount_percent)",
+        "UPPER(discount_percent)",
+        "LENGTH(discount_percent)",
+        "COALESCE(discount_percent, '0')",
+    ],
+)
+def test_percentage_text_functions_cannot_drop_exact_comparison(expression: str) -> None:
+    """Disallow text-function workarounds that would strip a percentage's numeric collation."""
+    with pytest.raises(QueryError, match="cannot be coerced"):
+        _discount_engine().query(f"SELECT promotion_id FROM promotions ORDER BY {expression}")
 
 
 def _join_engine() -> QueryEngine:

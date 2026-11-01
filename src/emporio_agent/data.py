@@ -10,6 +10,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import cast
 
@@ -149,7 +150,9 @@ def discover_sources(directory: Path) -> tuple[SourceFile, ...]:
 
 
 def sql_type(column: str) -> str:
-    """Return the strict SQLite storage type used by normalized business columns."""
+    """Return a strict SQLite declaration with exact comparison for decimal percentages."""
+    if column == "discount_percent":
+        return "TEXT COLLATE exact_decimal"
     return (
         "INTEGER"
         if column.endswith(("_id", "_cents"))
@@ -163,6 +166,26 @@ def sql_type(column: str) -> str:
     )
 
 
+def _compare_decimals(left: str, right: str) -> int:
+    """Compare finite decimal strings without SQLite's text ordering or float coercion."""
+    try:
+        first, second = Decimal(left), Decimal(right)
+    except InvalidOperation as exc:
+        raise ValueError("Percentage comparisons require finite decimal values.") from exc
+    if not first.is_finite() or not second.is_finite():
+        raise ValueError("Percentage comparisons require finite decimal values.")
+    return (first > second) - (first < second)
+
+
+def register_decimal_collation(connection: sqlite3.Connection) -> None:
+    """Enable exact percentage comparisons on a snapshot or restricted query connection.
+
+    Parameters:
+        connection: The SQLite connection that creates or reads decimal percentage columns.
+    """
+    connection.create_collation("exact_decimal", _compare_decimals)
+
+
 def _integer(value: str, *, zero_allowed: bool = False) -> int:
     if not re.fullmatch(r"\d+", value):
         raise DataError("An integer field contains an invalid value.")
@@ -170,6 +193,17 @@ def _integer(value: str, *, zero_allowed: bool = False) -> int:
     if result > MAX_CENTS or result < (0 if zero_allowed else 1):
         raise DataError("An integer field is outside its supported range.")
     return result
+
+
+def _validate_text(column: str, value: str) -> None:
+    """Validate structured text while preserving the supplied date or JSON representation."""
+    if column in _DATES:
+        if date.fromisoformat(value).isoformat() != value:
+            raise DataError("Dates must use YYYY-MM-DD format.")
+    if column == "specs":
+        parsed: object = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise DataError("Product specs must be a JSON object.")
 
 
 def _normalize(column: str, value: str) -> tuple[str, Value]:
@@ -190,13 +224,7 @@ def _normalize(column: str, value: str) -> tuple[str, Value]:
         return column, int(value.casefold() in {"1", "true"})
     if column == "discount_percent":
         return column, canonical_rate(value)
-    if column in _DATES:
-        if date.fromisoformat(value).isoformat() != value:
-            raise DataError("Dates must use YYYY-MM-DD format.")
-    if column == "specs":
-        parsed: object = json.loads(value)
-        if not isinstance(parsed, dict):
-            raise DataError("Product specs must be a JSON object.")
+    _validate_text(column, value)
     return column, value
 
 
@@ -280,6 +308,7 @@ def write_catalog(catalog: Catalog, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     try:
+        register_decimal_collation(connection)
         connection.execute("BEGIN IMMEDIATE")
         for name, table in catalog.tables.items():
             definitions = [

@@ -1,7 +1,8 @@
 """Exercise the native Agno/Anthropic loop with real tools and durable sessions."""
 
+import sqlite3
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,7 @@ import httpx2
 import pytest
 from agent_fixtures import (
     ClaudeStub,
+    FixedEmbedder,
     JsonObject,
     latest_user_text,
     small_snapshot,
@@ -23,6 +25,7 @@ from agno.models.anthropic import Claude
 from agno.models.message import Message
 
 from emporio_agent.agent import (
+    ConversationAccess,
     StoreTools,
     build_agent,
     chat_messages,
@@ -31,7 +34,72 @@ from emporio_agent.agent import (
     run_chat,
 )
 from emporio_agent.config import Settings
+from emporio_agent.documents import PolicyIndex
 from emporio_agent.runtime import Snapshot
+from emporio_agent.sql import QueryEngine
+
+
+def test_policy_tool_keeps_safe_provider_recovery_guidance(tmp_path: Path) -> None:
+    """A translated provider failure reaches the real agent tool result with useful guidance."""
+
+    class UnavailableEmbedder(FixedEmbedder):
+        def embed_query(self, query: str) -> tuple[float, ...]:
+            """Represent the safe error raised at the hosted embedding boundary."""
+            raise ValueError("The embedding provider request limit was reached. Retry later.")
+
+    snapshot = small_snapshot()
+    assert snapshot.policies is not None
+    policies = PolicyIndex(
+        snapshot.policies.chunks,
+        snapshot.policies.sections,
+        UnavailableEmbedder(),
+        snapshot.policies.fingerprint,
+    )
+    with _agent(
+        _settings(tmp_path),
+        replace(snapshot, policies=policies),
+        conversation_token(),
+        [
+            tool_response("search_policies", {"query": "payment"}),
+            text_response("Please retry later."),
+        ],
+    ) as (agent, _, stub):
+        run_chat(agent, "What payment methods are available?")
+        assert "request limit was reached. Retry later." in str(tool_results(stub.requests[-1]))
+
+
+def test_valid_order_details_recover_after_repeated_failures_and_resume(tmp_path: Path) -> None:
+    """Wrong details never permanently lock a conversation out of valid identification."""
+    settings = _settings(tmp_path)
+    snapshot = small_snapshot()
+    token = conversation_token()
+    with _agent(settings, snapshot, token, []) as (_, tools, _):
+        for _ in range(4):
+            assert tools.verify_order(501, "wrong@example.test")["verified"] is False
+    with _agent(settings, snapshot, token, []) as (_, tools, _):
+        assert tools.verify_order(501, "alex@example.test")["verified"] is True
+        assert tools.query_data("SELECT order_id FROM orders")["rows"] == [[501]]
+        assert tools.verify_order(501, "wrong@example.test")["verified"] is False
+        assert "error" in tools.query_data("SELECT order_id FROM orders")
+
+
+def test_old_verification_schema_migrates_without_losing_authorization(tmp_path: Path) -> None:
+    """Remove the legacy failure counter while retaining a valid generation-bound scope."""
+    path = tmp_path / "sessions.sqlite3"
+    token = conversation_token()
+    access = ConversationAccess(path, token, "generation")
+    engine = QueryEngine(small_snapshot().catalog)
+    assert access.verify(engine, 501, "alex@example.test")
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "ALTER TABLE store_access ADD COLUMN failures INTEGER NOT NULL DEFAULT 3"
+        )
+    resumed = ConversationAccess(path, token, "generation")
+    assert resumed.verified_order() == 501
+    assert resumed.verify(engine, 501, "alex@example.test")
+    with closing(sqlite3.connect(path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(store_access)")}
+    assert "failures" not in columns
 
 
 @pytest.mark.parametrize("second_rate", ["10", "20"])
@@ -184,6 +252,7 @@ def test_quote_uses_current_rules_and_exact_cent_allocation(
         result = tool_results(stub.requests[-1])[0]
         assert result["total"] == total
         assert result["installment_amounts"] == amounts
+        assert "approximate" not in str(result)
         assert sum(
             Decimal(value.removeprefix("BRL ").replace(",", "")) for value in amounts
         ) == Decimal(total.removeprefix("BRL ").replace(",", ""))

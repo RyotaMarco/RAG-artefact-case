@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from emporio_agent.data import DataError, SourceFile, build_catalog, discover_sources, write_catalog
+from emporio_agent.data import (
+    DataError,
+    SourceFile,
+    build_catalog,
+    discover_sources,
+    register_decimal_collation,
+    write_catalog,
+)
 
 
 def _source(name: str, text: str) -> SourceFile:
@@ -133,3 +140,27 @@ def test_persisted_snapshot_keeps_cents_integer_and_does_not_overwrite(tmp_path:
         connection.close()
     with pytest.raises(DataError, match="overwrite"):
         write_catalog(catalog, path)
+
+
+def test_persisted_percentages_retain_text_and_compare_numerically(tmp_path: Path) -> None:
+    """Keep exact percentage strings while fixing comparisons on reopened SQLite snapshots."""
+    fractional = "7.000000000000000000000000000000000000001"
+    source = _source(
+        "offers.csv",
+        "promotion_id,product_id,discount_percent,description,is_active\n"
+        f"1,1,8,Offer,true\n2,1,40,Offer,true\n3,1,{fractional},Offer,true\n",
+    )
+    path = tmp_path / "snapshot.sqlite"
+    write_catalog(build_catalog((source,)), path)
+    connection = sqlite3.connect(path)
+    try:
+        register_decimal_collation(connection)
+        assert connection.execute(
+            "SELECT discount_percent, typeof(discount_percent) FROM promotions "
+            "ORDER BY discount_percent"
+        ).fetchall() == [(fractional, "text"), ("8", "text"), ("40", "text")]
+        assert connection.execute("SELECT MAX(discount_percent) FROM promotions").fetchone() == (
+            "40",
+        )
+    finally:
+        connection.close()

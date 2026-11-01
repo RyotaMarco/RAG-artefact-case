@@ -6,7 +6,6 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "agno>=2.2",
   "anthropic>=0.75",
-  "httpx>=0.28",
   "httpx2>=2.16",
   "huggingface-hub>=0.34",
   "numpy>=2.2",
@@ -41,7 +40,14 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "D100", "D101", "D102", "D103", "D205"]
+select = ["E4", "E7", "E9", "F", "I", "UP", "D100", "D101", "D102", "D103", "D205", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# The test-only provider responder spells out scenarios; production code has no exemption.
+"tests/e2e_app.py" = ["C901"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

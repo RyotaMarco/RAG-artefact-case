@@ -5,8 +5,10 @@ from collections.abc import Callable
 
 import httpx2
 import streamlit as st
+from agno.agent import Agent
 
 from emporio_agent.agent import (
+    StoreTools,
     build_agent,
     chat_messages,
     close_agent,
@@ -23,6 +25,46 @@ logger = logging.getLogger(__name__)
 def _runtime(settings: Settings) -> StoreRuntime:
     """Share immutable indexes and a refresh lock, never user agents or identities."""
     return StoreRuntime(settings)
+
+
+def _render_sources(sources: list[dict[str, object]]) -> None:
+    """Present unique references supplied by the current tools."""
+    with st.expander("Sources consulted"):
+        seen: set[str] = set()
+        for source in sources:
+            label = str(source["file"])
+            if "section" in source:
+                label += f" · {source['section']} · pages {source['pages']}"
+            if label not in seen:
+                st.write(label)
+                seen.add(label)
+
+
+def _render_chat(agent: Agent, tools: StoreTools, token: str) -> None:
+    """Display completed messages and handle one customer question."""
+    history = chat_messages(agent, token)
+    if not history:
+        with st.chat_message("assistant"):
+            st.write("Hello! How can I help you find your next instrument?")
+    for message in history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    question = st.chat_input("Ask the store a question", max_chars=8000)
+    if not question:
+        return
+    with st.chat_message("user"):
+        st.write(question)
+    try:
+        with st.status("Preparing your answer…", expanded=False) as status:
+            answer = run_chat(agent, question)
+            status.update(label="Answer ready", state="complete")
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+            if tools.sources:
+                _render_sources(tools.sources)
+    except Exception as error:
+        logger.warning("Agent request failed: %s", type(error).__name__)
+        st.error("The request could not be completed. Please try again.")
 
 
 def render(
@@ -93,38 +135,7 @@ def render(
         st.error("The conversation could not be opened. Please try again.")
         return
     try:
-        history = chat_messages(agent, token)
-        if not history:
-            with st.chat_message("assistant"):
-                st.write("Hello! How can I help you find your next instrument?")
-        for message in history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-        question = st.chat_input("Ask the store a question", max_chars=8000)
-        if question:
-            with st.chat_message("user"):
-                st.write(question)
-            try:
-                with st.status("Preparing your answer…", expanded=False) as status:
-                    answer = run_chat(agent, question)
-                    status.update(label="Answer ready", state="complete")
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
-                    if tools.sources:
-                        with st.expander("Sources consulted"):
-                            seen: set[str] = set()
-                            for source in tools.sources:
-                                label = str(source.get("file", ""))
-                                if "section" in source:
-                                    label += (
-                                        f" · {source['section']} · pages {source.get('pages', ())}"
-                                    )
-                                if label and label not in seen:
-                                    st.write(label)
-                                    seen.add(label)
-            except Exception as error:
-                logger.warning("Agent request failed: %s", type(error).__name__)
-                st.error("The request could not be completed. Please try again.")
+        _render_chat(agent, tools, token)
     finally:
         close_agent(agent)
 
