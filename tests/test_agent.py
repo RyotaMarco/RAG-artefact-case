@@ -1,0 +1,330 @@
+"""Exercise the native Agno/Anthropic loop with real tools and durable sessions."""
+
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from decimal import Decimal
+from pathlib import Path
+from typing import cast
+
+import httpx2
+import pytest
+from agent_fixtures import (
+    ClaudeStub,
+    JsonObject,
+    latest_user_text,
+    small_snapshot,
+    text_response,
+    tool_response,
+    tool_results,
+)
+from agno.agent import Agent
+from agno.models.anthropic import Claude
+from agno.models.message import Message
+
+from emporio_agent.agent import (
+    StoreTools,
+    build_agent,
+    chat_messages,
+    close_agent,
+    conversation_token,
+    run_chat,
+)
+from emporio_agent.config import Settings
+from emporio_agent.runtime import Snapshot
+
+
+def test_provider_failure_is_not_presented_as_a_completed_answer(tmp_path: Path) -> None:
+    """Agno error RunOutputs must become a controlled UI error and stay out of history."""
+
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("Fixture network failure", request=request)
+
+    token = conversation_token()
+    agent, _ = build_agent(
+        _settings(tmp_path), small_snapshot(), token, transport=httpx2.MockTransport(fail)
+    )
+    try:
+        with pytest.raises(ValueError, match="did not complete"):
+            run_chat(agent, "Hello")
+        assert chat_messages(agent, token) == []
+    finally:
+        close_agent(agent)
+
+
+def _settings(tmp_path: Path) -> Settings:
+    return Settings(tmp_path / "data", tmp_path / "runtime", anthropic_key="fixture-key")
+
+
+@contextmanager
+def _agent(
+    settings: Settings,
+    snapshot: Snapshot,
+    token: str,
+    responses: Sequence[JsonObject],
+) -> Generator[tuple[Agent, StoreTools, ClaudeStub]]:
+    stub = ClaudeStub(responses)
+    agent, tools = build_agent(settings, snapshot, token, transport=stub.transport)
+    try:
+        yield agent, tools, stub
+    finally:
+        close_agent(agent)
+
+
+def _rows(result: JsonObject) -> list[object]:
+    value = result.get("rows")
+    assert isinstance(value, list)
+    return cast(list[object], value)
+
+
+def _additional_input(agent: Agent) -> list[object]:
+    """Narrow an upstream field whose third-party dictionary annotation is untyped."""
+    value = cast(list[object] | None, getattr(agent, "additional_input"))
+    return value or []
+
+
+def test_native_tool_loop_and_sdk_configuration(tmp_path: Path) -> None:
+    """Run real SQL through a native tool round trip and inspect the actual HTTP payload."""
+    settings = _settings(tmp_path)
+    with _agent(
+        settings,
+        small_snapshot(),
+        conversation_token(),
+        [
+            tool_response(
+                "query_data",
+                {"sql": "SELECT name, price_cents FROM products WHERE product_id = 101"},
+            ),
+            text_response("The Demo Guitar costs BRL 100.01.", thinking=True),
+        ],
+    ) as (agent, tools, stub):
+        assert run_chat(agent, "Quanto custa o violão?") == "The Demo Guitar costs BRL 100.01."
+        assert len(stub.requests) == 2
+        first = stub.requests[0]
+        assert first["model"] == settings.model
+        assert first["max_tokens"] == 1024
+        assert first["thinking"] == {"type": "between_tools"}
+        assert first["output_config"] == {"effort": "low"}
+        assert all(name not in first for name in ("temperature", "top_p", "top_k"))
+        assert "English" in str(first["system"])
+        assert "cache_control" in str(first["system"])
+        assert "cache_control" in str(first["tools"])
+        assert latest_user_text(first) == "Quanto custa o violão?"
+        result = tool_results(stub.requests[1])[0]
+        assert _rows(result) == [["Demo Guitar", "BRL 100.01"]]
+        assert "fixture-signature" in str(stub.requests[1]["messages"])
+        assert tools.sources == [{"file": "instruments.csv"}]
+        model = agent.model
+        assert isinstance(model, Claude)
+        assert model.client is not None
+        client = model.client
+        assert not client.is_closed()
+    assert client.is_closed()
+
+
+@pytest.mark.parametrize(
+    ("price", "pix_rate", "promotion", "method", "count", "total", "amounts"),
+    [
+        (10001, "7", None, "credit", 6, "BRL 100.01", ["BRL 16.67"] * 5 + ["BRL 16.66"]),
+        (17777, "11", None, "pix", 1, "BRL 158.22", ["BRL 158.22"]),
+        (10001, "7", "17", "pix", 1, "BRL 83.01", ["BRL 83.01"]),
+    ],
+)
+def test_quote_uses_current_rules_and_exact_cent_allocation(
+    tmp_path: Path,
+    price: int,
+    pix_rate: str,
+    promotion: str | None,
+    method: str,
+    count: int,
+    total: str,
+    amounts: list[str],
+) -> None:
+    """Compute through the actual quote tool, including changed input rules and non-stacking."""
+    snapshot = small_snapshot(price_cents=price, pix_percent=pix_rate, promotion_percent=promotion)
+    with _agent(
+        _settings(tmp_path),
+        snapshot,
+        conversation_token(),
+        [
+            tool_response(
+                "calculate_quote",
+                {
+                    "product_id": 101,
+                    "payment_method": method,
+                    "installments": count,
+                },
+            ),
+            text_response("Here are the current payment conditions."),
+        ],
+    ) as (agent, _, stub):
+        run_chat(agent, "What would I pay for this instrument?")
+        result = tool_results(stub.requests[-1])[0]
+        assert result["total"] == total
+        assert result["installment_amounts"] == amounts
+        assert sum(
+            Decimal(value.removeprefix("BRL ").replace(",", "")) for value in amounts
+        ) == Decimal(total.removeprefix("BRL ").replace(",", ""))
+        assert "payment-policy.pdf" in str(result["sources"])
+
+
+def test_verified_order_scope_is_enforced_and_failed_verification_clears_it(tmp_path: Path) -> None:
+    """A model's broad WHERE clause cannot escape the verified customer's data subset."""
+    settings = _settings(tmp_path)
+    snapshot = small_snapshot()
+    token = conversation_token()
+    with _agent(
+        settings,
+        snapshot,
+        token,
+        [
+            tool_response(
+                "verify_order", {"order_id": 501, "email": "alex@example.test"}, call_id="verify"
+            ),
+            tool_response(
+                "query_data",
+                {"sql": "SELECT order_id, status FROM orders WHERE order_id = 502 OR 1 = 1"},
+                call_id="query",
+            ),
+            text_response("Your order is shipped."),
+        ],
+    ) as (agent, tools, stub):
+        run_chat(agent, "Check order 501, alex@example.test.")
+        results = tool_results(stub.requests[-1])
+        assert results[0] == {"verified": True, "order_id": 501}
+        assert _rows(results[1]) == [[501, "shipped"]]
+        assert tools.access.verified_order() == 501
+        assert "Private Bea note" not in str(results)
+        assert "bea@example.test" not in str(results)
+    with _agent(settings, snapshot, conversation_token(), []) as (_, tools, _):
+        assert tools.access.verified_order() is None
+    with _agent(
+        settings,
+        snapshot,
+        token,
+        [
+            tool_response(
+                "verify_order", {"order_id": 501, "email": "wrong@example.test"}, call_id="reject"
+            ),
+            tool_response("query_data", {"sql": "SELECT order_id FROM orders"}, call_id="blocked"),
+            text_response("The supplied order details could not be verified."),
+        ],
+    ) as (agent, tools, stub):
+        run_chat(agent, "Try this other email instead.")
+        results = tool_results(stub.requests[-1])
+        assert results[0] == {
+            "verified": False,
+            "error": "The supplied order details could not be verified.",
+        }
+        assert "error" in results[1]
+        assert tools.access.verified_order() is None
+
+
+def test_unknown_order_and_wrong_email_have_same_generic_response(tmp_path: Path) -> None:
+    """Verification failure must not disclose whether an order or email exists."""
+    failures: list[JsonObject] = []
+    for order_id, email in ((501, "wrong@example.test"), (999, "alex@example.test")):
+        with _agent(
+            _settings(tmp_path),
+            small_snapshot(),
+            conversation_token(),
+            [
+                tool_response("verify_order", {"order_id": order_id, "email": email}),
+                text_response("The supplied order details could not be verified."),
+            ],
+        ) as (agent, _, stub):
+            run_chat(agent, "Please verify my order.")
+            failures.append(tool_results(stub.requests[-1])[0])
+    assert failures[0] == failures[1]
+
+
+def test_resume_is_private_and_only_last_three_plain_turns_are_replayed(tmp_path: Path) -> None:
+    """Reload durable sessions without leaking another conversation or signed provider blocks."""
+    settings = _settings(tmp_path)
+    snapshot = small_snapshot()
+    first_token, second_token = conversation_token(), conversation_token()
+    for turn in range(5):
+        with _agent(
+            settings,
+            snapshot,
+            first_token,
+            [
+                text_response(f"Answer A {turn}", thinking=True),
+            ],
+        ) as (agent, _, _):
+            run_chat(agent, f"Question A {turn}")
+    with _agent(settings, snapshot, second_token, [text_response("Answer B")]) as (agent, tools, _):
+        assert "Question A" not in str(_additional_input(agent))
+        assert tools.access.verified_order() is None
+        run_chat(agent, "Question B")
+    with _agent(settings, snapshot, first_token, []) as (agent, _, _):
+        replay = [message for message in _additional_input(agent) if isinstance(message, Message)]
+        assert [message.content for message in replay if message.role == "assistant"] == [
+            "Answer A 2",
+            "Answer A 3",
+            "Answer A 4",
+        ]
+        assert all(
+            message.provider_data is None
+            and message.reasoning_content is None
+            and not message.tool_calls
+            for message in replay
+        )
+        display = chat_messages(agent, first_token)
+        assert len(display) == 10
+        assert "Question B" not in str(display)
+        stored = agent.get_session_messages(session_id=first_token)
+        assert any(message.reasoning_content for message in stored)
+
+
+def test_resumed_price_question_uses_fresh_tool_evidence(tmp_path: Path) -> None:
+    """A current data-tool result replaces an old quoted value while history stays available."""
+    settings = _settings(tmp_path)
+    token = conversation_token()
+    query: JsonObject = {"sql": "SELECT price_cents FROM products WHERE product_id = 101"}
+    with _agent(
+        settings,
+        small_snapshot(),
+        token,
+        [
+            tool_response("query_data", query),
+            text_response("The price is BRL 100.01."),
+        ],
+    ) as (agent, _, _):
+        run_chat(agent, "What is the guitar price?")
+    updated = small_snapshot(price_cents=20002)
+    with _agent(
+        settings,
+        updated,
+        token,
+        [
+            tool_response("query_data", query),
+            text_response("The current price is BRL 200.02."),
+        ],
+    ) as (agent, _, stub):
+        assert "BRL 100.01" in str(_additional_input(agent))
+        assert run_chat(agent, "What is its price now?") == "The current price is BRL 200.02."
+        assert _rows(tool_results(stub.requests[-1])[0]) == [["BRL 200.02"]]
+        assert "Before repeating an earlier price" in str(stub.requests[0]["system"])
+
+
+def test_replaced_source_generation_revokes_order_scope_without_losing_history(
+    tmp_path: Path,
+) -> None:
+    """A refreshed catalog cannot inherit authorization solely from a reused order number."""
+    settings = _settings(tmp_path)
+    token = conversation_token()
+    with _agent(
+        settings,
+        small_snapshot(),
+        token,
+        [
+            tool_response("verify_order", {"order_id": 501, "email": "alex@example.test"}),
+            text_response("The order details are verified."),
+        ],
+    ) as (agent, tools, _):
+        run_chat(agent, "Please verify my order.")
+        assert tools.access.verified_order() == 501
+    with _agent(settings, small_snapshot(price_cents=50000), token, []) as (agent, tools, _):
+        assert tools.access.verified_order() is None
+        assert "The order details are verified." in str(_additional_input(agent))
+        assert len(chat_messages(agent, token)) == 2
