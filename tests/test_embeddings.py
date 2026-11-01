@@ -71,6 +71,7 @@ class FakeClient:
 
     def __init__(self, vector: list[float] | None = None) -> None:
         self.calls: list[list[str]] = []
+        self.models: list[str] = []
         self.vector = vector if vector is not None else [3.0, 4.0]
         self.fail = False
 
@@ -83,6 +84,7 @@ class FakeClient:
         assert not truncate
         batch = [text] if isinstance(text, str) else text
         self.calls.append(batch)
+        self.models.append(model)
         if self.fail:
             raise TimeoutError("Embedding service timed out")
         return [self.vector for _ in batch]
@@ -103,6 +105,70 @@ def test_cache_is_persistent_and_queries_use_instruction(tmp_path: Path) -> None
     assert client.calls[-1][0].startswith("Instruct:")
     assert "Query: PIX discount" in client.calls[-1][0]
     assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize("query_prefix, document_prefix", [("query: {text}", "passage:"), ("", "")])
+def test_configured_prefixes_and_model_reach_provider_without_template_expansion(
+    tmp_path: Path, query_prefix: str, document_prefix: str
+) -> None:
+    """Allow model-specific input conventions, including encoders requiring no prefixes."""
+    client = FakeClient()
+    config = EmbeddingConfig(
+        model="example/encoder",
+        provider="example-provider",
+        dimensions=2,
+        query_prefix=query_prefix,
+        document_prefix=document_prefix,
+    )
+    embedder = HFEmbedder(tmp_path / "vectors.sqlite3", client=client, config=config)
+    embedder.embed_documents(["Document text"])
+    embedder.embed_query("Question text")
+    assert client.calls == [
+        [f"{document_prefix} Document text" if document_prefix else "Document text"],
+        [f"{query_prefix} Question text" if query_prefix else "Question text"],
+    ]
+    assert client.models == ["example/encoder", "example/encoder"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        EmbeddingConfig(model="example/encoder", dimensions=2),
+        EmbeddingConfig(provider="example-provider", dimensions=2),
+        EmbeddingConfig(dimensions=3),
+        EmbeddingConfig(query_prefix="query:", dimensions=2),
+        EmbeddingConfig(document_prefix="passage:", dimensions=2),
+    ],
+)
+def test_embedding_configuration_changes_cannot_reuse_old_cached_vectors(
+    tmp_path: Path, changed: EmbeddingConfig
+) -> None:
+    """Version every input convention and vector-space setting in persistent cache keys."""
+    path = tmp_path / "vectors.sqlite3"
+    original = EmbeddingConfig(dimensions=2)
+    HFEmbedder(path, client=FakeClient(), config=original).embed_documents(["Same text"])
+    client = FakeClient([1.0] * changed.dimensions)
+    replacement = HFEmbedder(path, client=client, config=changed)
+    replacement.embed_documents(["Same text"])
+    assert replacement.fingerprint != original.fingerprint
+    assert len(client.calls) == 1
+    replacement.embed_documents(["Same text"])
+    assert len(client.calls) == 1
+
+
+def test_nonempty_prefix_cannot_hide_an_empty_embedding_input(tmp_path: Path) -> None:
+    """Reject empty customer or document text before adding configured model prefixes."""
+    client = FakeClient()
+    embedder = HFEmbedder(
+        tmp_path / "vectors.sqlite3",
+        client=client,
+        config=EmbeddingConfig(dimensions=2, query_prefix="query:", document_prefix="passage:"),
+    )
+    with pytest.raises(ValueError, match="empty"):
+        embedder.embed_documents([" "])
+    with pytest.raises(ValueError, match="empty"):
+        embedder.embed_query(" ")
+    assert not client.calls
 
 
 def test_provider_failure_is_not_cached_or_silently_retried(tmp_path: Path) -> None:

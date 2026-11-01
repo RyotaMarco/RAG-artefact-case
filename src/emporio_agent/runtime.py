@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from decimal import localcontext
 from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING, cast
 
 from huggingface_hub import (
     InferenceClient,
@@ -28,11 +29,19 @@ from emporio_agent.data import (
     write_catalog,
 )
 from emporio_agent.documents import PolicyChunk, PolicyIndex, PolicySection, build_index
-from emporio_agent.embeddings import Embedder, HFEmbedder, ModelTokenizer, TextTokenizer
+from emporio_agent.embeddings import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_TOKENIZER_REVISION,
+    Embedder,
+    HFEmbedder,
+    ModelTokenizer,
+    TextTokenizer,
+)
 from emporio_agent.policies import FinancialRuleSet, extract_rules
 
-TOKENIZER_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-TOKENIZER_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+if TYPE_CHECKING:
+    from huggingface_hub.inference._providers import PROVIDER_T
+
 PIPELINE_VERSION = "layout-catalog-money-v2"
 logger = logging.getLogger(__name__)
 
@@ -71,14 +80,18 @@ class Snapshot:
         }
 
 
-def load_tokenizer(runtime_dir: Path) -> ModelTokenizer:
-    """Download only a pinned tokenizer, never local model weights or PyTorch."""
+def load_tokenizer(settings: Settings) -> ModelTokenizer:
+    """Download the configured tokenizer, never local model weights or PyTorch."""
+    model = settings.tokenizer_model or settings.embedding.model
+    revision = settings.tokenizer_revision or (
+        DEFAULT_TOKENIZER_REVISION if model == DEFAULT_EMBEDDING_MODEL else "main"
+    )
     cached = hf_hub_download(
-        TOKENIZER_MODEL,
+        model,
         filename="tokenizer.json",
-        revision=TOKENIZER_REVISION,
-        cache_dir=str(runtime_dir / "tokenizer"),
-        token=False,
+        revision=revision,
+        cache_dir=str(settings.runtime_dir / "tokenizer"),
+        token=settings.hf_token or False,
     )
     return ModelTokenizer.from_file(Path(cached))
 
@@ -108,11 +121,14 @@ class StoreRuntime:
             self._embedder = HFEmbedder(
                 self.settings.runtime_dir / "vectors.sqlite3",
                 client=InferenceClient(
-                    provider="deepinfra", token=self.settings.hf_token, timeout=30
+                    provider=cast("PROVIDER_T", self.settings.embedding.provider),
+                    token=self.settings.hf_token,
+                    timeout=self.settings.embedding_timeout_seconds,
                 ),
+                config=self.settings.embedding,
             )
         if self._tokenizer is None:
-            self._tokenizer = load_tokenizer(self.settings.runtime_dir)
+            self._tokenizer = load_tokenizer(self.settings)
 
     def _policy_index(
         self,
@@ -132,7 +148,7 @@ class StoreRuntime:
                     )
             except (ValidationError, OSError):
                 pass
-        index = build_index(pdfs, embedder, tokenizer)
+        index = build_index(pdfs, embedder, tokenizer, chunking=self.settings.chunking)
         cache = _IndexCache(
             generation_id=generation,
             index_fingerprint=index.fingerprint,
@@ -198,6 +214,7 @@ class StoreRuntime:
                 self._tokenizer.fingerprint
                 if pdfs and self._tokenizer is not None
                 else "no-tokenizer",
+                self.settings.chunking.fingerprint if pdfs else "no-chunks",
             )
             generation = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             if self._current is not None and self._current.generation_id == generation:

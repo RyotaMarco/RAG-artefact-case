@@ -73,6 +73,76 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: Validate Compose deployment settings
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          names = {
+              line.split("=", 1)[0]
+              for line in Path(".env.example").read_text().splitlines()
+              if line and not line.startswith("#")
+          }
+
+          def resolve(overrides: dict[str, str], dotenv_text: str = "") -> dict[str, object]:
+              """Resolve real Compose settings without a daemon or API credentials."""
+              environment = {key: value for key, value in os.environ.items() if key not in names}
+              environment.update(overrides)
+              with tempfile.TemporaryDirectory() as directory:
+                  dotenv = Path(directory) / "deployment.env"
+                  dotenv.write_text(dotenv_text)
+                  result = subprocess.run(
+                      ["docker", "compose", "--env-file", str(dotenv), "config", "--format", "json"],
+                      check=True, capture_output=True, text=True, env=environment,
+                  )
+              return json.loads(result.stdout)["services"]["app"]
+
+          default = resolve({})
+          assert default["environment"].get("EMBEDDING_QUERY_PREFIX") is None
+          assert default["environment"]["DATA_DIR"] == "/app/data"
+          assert default["environment"]["RUNTIME_DIR"] == "/app/runtime"
+          assert default["ports"][0]["published"] == "8501"
+          assert default["ports"][0]["target"] == 8501
+          assert default["ports"][0]["host_ip"] == "127.0.0.1"
+          runtime = next(volume for volume in default["volumes"] if volume["target"] == "/app/runtime")
+          assert runtime["type"] == "volume" and runtime["source"] == "runtime_data"
+
+          dotenv = (
+              "EMBEDDING_MODEL=organization/plain-model\n"
+              "EMBEDDING_DIMENSIONS=384\n"
+              "EMBEDDING_QUERY_PREFIX=\n"
+              "EMBEDDING_DOCUMENT_PREFIX=passage:\\nText:\n"
+              "CHUNK_TARGET_TOKENS=256\n"
+              "CHUNK_MAX_TOKENS=384\n"
+              "CHUNK_OVERLAP_TOKENS=0\n"
+          )
+          from_file = resolve({}, dotenv)["environment"]
+          assert from_file["EMBEDDING_MODEL"] == "organization/plain-model"
+          assert from_file["EMBEDDING_DIMENSIONS"] == "384"
+          assert from_file["EMBEDDING_QUERY_PREFIX"] == ""
+          assert from_file["EMBEDDING_DOCUMENT_PREFIX"] == r"passage:\nText:"
+          assert from_file["CHUNK_TARGET_TOKENS"] == "256"
+          assert from_file["CHUNK_MAX_TOKENS"] == "384"
+          assert from_file["CHUNK_OVERLAP_TOKENS"] == "0"
+          custom = resolve({
+              "APP_PORT": "8601", "DATA_DIR": "./data/custom inputs",
+              "EMBEDDING_QUERY_PREFIX": r"query:\nText:",
+          }, dotenv)
+          assert custom["environment"]["EMBEDDING_QUERY_PREFIX"] == r"query:\nText:"
+          assert custom["environment"]["DATA_DIR"] == "/app/data"
+          assert custom["environment"]["RUNTIME_DIR"] == "/app/runtime"
+          assert custom["ports"][0]["published"] == "8601"
+          assert custom["ports"][0]["target"] == 8501
+          source = next(volume for volume in custom["volumes"] if volume["target"] == "/app/data")
+          assert source["source"] == str(Path("data/custom inputs").resolve())
+          assert source["type"] == "bind" and source["read_only"] is True
+          assert source.get("bind", {}).get("create_host_path", False) is False
+          PY
       - name: Build production image
         run: docker build --target production --tag emporio-agent:ci .
       - name: Check production health
