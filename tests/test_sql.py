@@ -80,6 +80,69 @@ def test_percentage_ordering_extrema_and_fractional_bounds_stay_exact() -> None:
     ).rows == ((5,),)
 
 
+@pytest.mark.parametrize(
+    ("predicate", "expected"),
+    [
+        ("MIN(discount_percent) > 10", ()),
+        ("MIN(discount_percent) < 10", (("5", "40"),)),
+        ("MIN(discount_percent) BETWEEN 0 AND 10", (("5", "40"),)),
+        ("MIN(discount_percent) IN (5, 8)", (("5", "40"),)),
+        ("5 IN (MIN(discount_percent))", (("5", "40"),)),
+        ("MAX(discount_percent) > 10", (("5", "40"),)),
+        ("MAX(discount_percent) < 10", ()),
+    ],
+)
+def test_percentage_aggregate_predicates_retain_exact_comparison(
+    predicate: str, expected: tuple[tuple[str, ...], ...]
+) -> None:
+    """Compare aggregate percentages numerically, preserving TEXT affinity in HAVING."""
+    result = _discount_engine().query(
+        f"SELECT MIN(discount_percent), MAX(discount_percent) FROM promotions HAVING {predicate}"
+    )
+    assert result.rows == expected
+
+
+def test_grouped_percentage_aggregate_ordering_retains_decimal_precision() -> None:
+    """Sort aggregate rates numerically, including fractions indistinguishable as floats."""
+    smaller = "7.000000000000000000000000000000000000001"
+    larger = "7.000000000000000000000000000000000000002"
+    result = _discount_engine().query(
+        "SELECT promotion_id, MAX(discount_percent) FROM promotions "
+        "GROUP BY promotion_id ORDER BY MAX(discount_percent) DESC"
+    )
+    assert result.rows == ((4, "40"), (3, "10"), (2, "8"), (6, larger), (5, smaller), (1, "5"))
+
+
+@pytest.mark.parametrize("value", ["5", "'5.0'"])
+def test_reverse_percentage_in_uses_decimal_equivalence(value: str) -> None:
+    """IN must not discard percentage collation when its column appears in the value list."""
+    assert _discount_engine().query(
+        f"SELECT promotion_id FROM promotions WHERE {value} IN (discount_percent)"
+    ).rows == ((1,),)
+
+
+def test_percentage_aggregate_wrappers_preserve_money_units_and_values() -> None:
+    """Trusted percentage normalization must not change neighboring exact monetary outputs."""
+    result = _join_engine().query(
+        "SELECT MIN(p.price_cents) AS minimum_price, MAX(m.discount_percent) AS maximum_rate "
+        "FROM products p JOIN promotions m ON p.product_id = m.product_id"
+    )
+    assert result.rows == ((1001, "5"),)
+    assert result.money_indexes == (0,)
+    assert result.as_dict()["rows"] == [["BRL 10.01", "5"]]
+
+
+@pytest.mark.parametrize(
+    "expression", ["CAST(discount_percent AS TEXT)", "discount_percent COLLATE exact_decimal"]
+)
+def test_percentage_normalization_does_not_allow_customer_cast_or_collation(
+    expression: str,
+) -> None:
+    """Only trusted post-validation rewriting may introduce casts and collations."""
+    with pytest.raises(QueryError, match="Only simple SELECT"):
+        _discount_engine().query(f"SELECT {expression} FROM promotions")
+
+
 @pytest.mark.parametrize("value", ["not-a-number", "NaN", "Infinity", "-Infinity"])
 def test_invalid_percentage_comparison_values_are_controlled_errors(value: str) -> None:
     """An invalid filter cannot silently fall back to lexical or nonfinite comparison."""
