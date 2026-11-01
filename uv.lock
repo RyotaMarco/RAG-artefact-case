@@ -202,7 +202,6 @@ source = { editable = "." }
 dependencies = [
     { name = "agno" },
     { name = "anthropic" },
-    { name = "httpx" },
     { name = "httpx2" },
     { name = "huggingface-hub" },
     { name = "numpy" },
@@ -227,7 +226,6 @@ dev = [
 requires-dist = [
     { name = "agno", specifier = ">=2.2" },
     { name = "anthropic", specifier = ">=0.75" },
-    { name = "httpx", specifier = ">=0.28" },
     { name = "httpx2", specifier = ">=2.16" },
     { name = "huggingface-hub", specifier = ">=0.34" },
     { name = "numpy", specifier = ">=2.2" },
