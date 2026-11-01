@@ -4,16 +4,43 @@ services:
       context: .
       target: production
     ports:
-      - "127.0.0.1:8501:8501"
+      - target: 8501
+        published: "${APP_PORT:-8501}"
+        host_ip: 127.0.0.1
+        protocol: tcp
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5-5}
+      # Pass shell/.env values through; absent settings keep the Python defaults.
+      CLAUDE_MODEL:
+      CLAUDE_TIMEOUT_SECONDS:
+      CLAUDE_MAX_TOKENS:
+      MAX_TOOL_CALLS:
+      STORE_TIMEZONE:
+      EMBEDDING_MODEL:
+      EMBEDDING_PROVIDER:
+      EMBEDDING_DIMENSIONS:
+      EMBEDDING_TIMEOUT_SECONDS:
+      # An omitted prefix uses its model default; a defined empty prefix stays empty.
+      EMBEDDING_QUERY_PREFIX:
+      EMBEDDING_DOCUMENT_PREFIX:
+      EMBEDDING_TOKENIZER_MODEL:
+      EMBEDDING_TOKENIZER_REVISION:
+      CHUNK_TARGET_TOKENS:
+      CHUNK_MAX_TOKENS:
+      CHUNK_OVERLAP_TOKENS:
       DATA_DIR: /app/data
       RUNTIME_DIR: /app/runtime
     volumes:
-      - ./data:/app/data:ro
-      - runtime_data:/app/runtime
+      - type: bind
+        source: "${DATA_DIR:-./data}"
+        target: /app/data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: runtime_data
+        target: /app/runtime
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

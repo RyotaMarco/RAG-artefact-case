@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -11,12 +12,20 @@ from typing import cast
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
 
 from emporio_agent.config import Settings
 from emporio_agent.data import Catalog, DataError, write_catalog
-from emporio_agent.embeddings import EmbeddingConfig, HFEmbedder
+from emporio_agent.documents import ChunkConfig
+from emporio_agent.embeddings import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_TOKENIZER_REVISION,
+    EmbeddingConfig,
+    HFEmbedder,
+)
 from emporio_agent.policies import PolicyUnavailableError
-from emporio_agent.runtime import Snapshot, StoreRuntime
+from emporio_agent.runtime import Snapshot, StoreRuntime, load_tokenizer
 
 
 class CountingTokenizer:
@@ -176,6 +185,130 @@ def _scalar(path: Path, sql: str) -> object:
 def _citations(snapshot: Snapshot) -> set[str]:
     assert snapshot.policies is not None
     return {citation.source for chunk in snapshot.policies.chunks for citation in chunk.citations}
+
+
+@pytest.mark.parametrize(
+    "embedding_model, tokenizer_model, revision, expected_model, expected_revision",
+    [
+        (DEFAULT_EMBEDDING_MODEL, None, None, DEFAULT_EMBEDDING_MODEL, DEFAULT_TOKENIZER_REVISION),
+        ("example/encoder", None, None, "example/encoder", "main"),
+        (DEFAULT_EMBEDDING_MODEL, "example/tokenizer", None, "example/tokenizer", "main"),
+        (
+            "example/encoder",
+            DEFAULT_EMBEDDING_MODEL,
+            None,
+            DEFAULT_EMBEDDING_MODEL,
+            DEFAULT_TOKENIZER_REVISION,
+        ),
+        (
+            "example/encoder",
+            "example/tokenizer",
+            "fixture-revision",
+            "example/tokenizer",
+            "fixture-revision",
+        ),
+    ],
+)
+def test_tokenizer_download_follows_effective_repository_and_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    embedding_model: str,
+    tokenizer_model: str | None,
+    revision: str | None,
+    expected_model: str,
+    expected_revision: str,
+) -> None:
+    """Pin the default Qwen tokenizer without applying its commit to an unrelated model."""
+    local_tokenizer = tmp_path / "tokenizer.json"
+    Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")).save(str(local_tokenizer))
+    calls: list[dict[str, object]] = []
+
+    def download(repo_id: str, **kwargs: object) -> str:
+        calls.append({"repo_id": repo_id, **kwargs})
+        return str(local_tokenizer)
+
+    monkeypatch.setattr("emporio_agent.runtime.hf_hub_download", download)
+    settings = replace(
+        _settings(tmp_path),
+        hf_token="hf_fixture",
+        embedding=EmbeddingConfig(model=embedding_model),
+        tokenizer_model=tokenizer_model,
+        tokenizer_revision=revision,
+    )
+    assert load_tokenizer(settings).count("policy") == 1
+    assert calls == [
+        {
+            "repo_id": expected_model,
+            "filename": "tokenizer.json",
+            "revision": expected_revision,
+            "cache_dir": str(settings.runtime_dir / "tokenizer"),
+            "token": "hf_fixture",
+        }
+    ]
+
+
+def test_runtime_embedding_settings_reach_client_and_invalidate_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing model conventions rebuilds policy vectors with the configured hosted client."""
+    settings = _settings(tmp_path)
+    _categories(settings.data_dir)
+    _payments(settings.data_dir / "payments.pdf")
+    settings = replace(
+        settings,
+        hf_token="hf_fixture",
+        embedding_timeout_seconds=12,
+        embedding=EmbeddingConfig(
+            model="example/encoder",
+            provider="example-provider",
+            dimensions=2,
+            query_prefix="query:",
+            document_prefix="passage:",
+        ),
+    )
+    client = RecordingClient()
+    arguments: list[dict[str, object]] = []
+
+    def make_client(**kwargs: object) -> RecordingClient:
+        arguments.append(kwargs)
+        return client
+
+    monkeypatch.setattr("emporio_agent.runtime.InferenceClient", make_client)
+    first = StoreRuntime(settings, tokenizer=CountingTokenizer()).refresh()
+    assert arguments == [{"provider": "example-provider", "token": "hf_fixture", "timeout": 12}]
+    assert client.calls[0][0].startswith("passage: ")
+    updated = replace(settings, embedding=replace(settings.embedding, document_prefix="document:"))
+    second = StoreRuntime(updated, tokenizer=CountingTokenizer()).refresh()
+    assert first.generation_id != second.generation_id
+    assert len(client.calls) == 2
+    assert client.calls[-1][0].startswith("document: ")
+
+
+def test_chunk_settings_rebuild_metadata_and_reuse_vectors_for_unchanged_passages(
+    tmp_path: Path,
+) -> None:
+    """A window change rechunks PDFs without paying again for identical resulting text."""
+    settings = _settings(tmp_path)
+    _categories(settings.data_dir)
+    _payments(settings.data_dir / "payments.pdf")
+    client = RecordingClient()
+    embedder = HFEmbedder(
+        settings.runtime_dir / "vectors.sqlite3",
+        client=client,
+        config=EmbeddingConfig(dimensions=2),
+    )
+    tokenizer = CountingTokenizer()
+    first = StoreRuntime(settings, embedder=embedder, tokenizer=tokenizer).refresh()
+    original_calls = tokenizer.calls
+    updated = replace(
+        settings, chunking=ChunkConfig(target_tokens=500, max_tokens=750, overlap_tokens=60)
+    )
+    second = StoreRuntime(updated, embedder=embedder, tokenizer=tokenizer).refresh()
+    assert second.generation_id != first.generation_id
+    assert tokenizer.calls > original_calls
+    assert first.policies is not None and second.policies is not None
+    assert second.policies.chunks == first.policies.chunks
+    assert len(client.calls) == 1
 
 
 def test_unchanged_refresh_reuses_generation_and_does_not_embed_csv(tmp_path: Path) -> None:
