@@ -66,8 +66,6 @@ class Catalog:
                     for column in table.columns
                     if name != "orders" or column not in {"customer_id", "notes"}
                 },
-                "row_count": len(table.rows),
-                "sources": table.source_paths,
                 "observed_values": enums,
                 "requires_verified_order": name in {"orders", "order_items"},
             }
