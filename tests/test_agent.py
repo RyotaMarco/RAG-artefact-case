@@ -1,7 +1,8 @@
 """Exercise the native Agno/Anthropic loop with real tools and durable sessions."""
 
+import sqlite3
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,7 @@ from agno.models.anthropic import Claude
 from agno.models.message import Message
 
 from emporio_agent.agent import (
+    ConversationAccess,
     StoreTools,
     build_agent,
     chat_messages,
@@ -32,6 +34,41 @@ from emporio_agent.agent import (
 )
 from emporio_agent.config import Settings
 from emporio_agent.runtime import Snapshot
+from emporio_agent.sql import QueryEngine
+
+
+def test_valid_order_details_recover_after_repeated_failures_and_resume(tmp_path: Path) -> None:
+    """Wrong details never permanently lock a conversation out of valid identification."""
+    settings = _settings(tmp_path)
+    snapshot = small_snapshot()
+    token = conversation_token()
+    with _agent(settings, snapshot, token, []) as (_, tools, _):
+        for _ in range(4):
+            assert tools.verify_order(501, "wrong@example.test")["verified"] is False
+    with _agent(settings, snapshot, token, []) as (_, tools, _):
+        assert tools.verify_order(501, "alex@example.test")["verified"] is True
+        assert tools.query_data("SELECT order_id FROM orders")["rows"] == [[501]]
+        assert tools.verify_order(501, "wrong@example.test")["verified"] is False
+        assert "error" in tools.query_data("SELECT order_id FROM orders")
+
+
+def test_old_verification_schema_migrates_without_losing_authorization(tmp_path: Path) -> None:
+    """Remove the legacy failure counter while retaining a valid generation-bound scope."""
+    path = tmp_path / "sessions.sqlite3"
+    token = conversation_token()
+    access = ConversationAccess(path, token, "generation")
+    engine = QueryEngine(small_snapshot().catalog)
+    assert access.verify(engine, 501, "alex@example.test")
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "ALTER TABLE store_access ADD COLUMN failures INTEGER NOT NULL DEFAULT 3"
+        )
+    resumed = ConversationAccess(path, token, "generation")
+    assert resumed.verified_order() == 501
+    assert resumed.verify(engine, 501, "alex@example.test")
+    with closing(sqlite3.connect(path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(store_access)")}
+    assert "failures" not in columns
 
 
 @pytest.mark.parametrize("second_rate", ["10", "20"])
