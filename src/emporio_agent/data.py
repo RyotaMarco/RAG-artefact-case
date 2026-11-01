@@ -228,6 +228,25 @@ def _normalize(column: str, value: str) -> tuple[str, Value]:
     return column, value
 
 
+def _classify_headers(headers: tuple[str, ...]) -> str:
+    """Select one complete business role without mistaking a partial wider schema for it."""
+    available = set(headers)
+    schemas = {name: set(required) for name, required in _HEADERS.items()}
+    complete = {name: required for name, required in schemas.items() if required <= available}
+    maximal = [
+        name
+        for name, required in complete.items()
+        if not any(required < other for other in complete.values())
+    ]
+    if len(maximal) != 1:
+        raise DataError("CSV headers do not identify exactly one supported business schema.")
+    name = maximal[0]
+    selected = schemas[name]
+    if any(selected < other and available & (other - selected) for other in schemas.values()):
+        raise DataError("CSV headers do not identify exactly one supported business schema.")
+    return name
+
+
 def _read_csv(source: SourceFile) -> tuple[str, list[Row]]:
     try:
         text = source.content.decode("utf-8-sig")
@@ -235,19 +254,7 @@ def _read_csv(source: SourceFile) -> tuple[str, list[Row]]:
         headers = tuple(value.strip() for value in next(reader))
         if len(set(headers)) != len(headers):
             raise DataError("CSV headers must be unique.")
-        known_headers = {column for required in _HEADERS.values() for column in required}
-        matches = [
-            name
-            for name, required in _HEADERS.items()
-            if set(required) <= set(headers)
-            and not ((set(headers) & known_headers) - set(required))
-        ]
-        if matches:
-            specificity = max(len(_HEADERS[name]) for name in matches)
-            matches = [name for name in matches if len(_HEADERS[name]) == specificity]
-        if len(matches) != 1:
-            raise DataError("CSV headers do not identify exactly one supported business schema.")
-        name = matches[0]
+        name = _classify_headers(headers)
         rows: list[Row] = []
         for number, values in enumerate(reader, start=2):
             if not values or all(not value.strip() for value in values):
