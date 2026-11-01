@@ -216,7 +216,8 @@ def _validate_joins(
         prior.add(new_alias)
 
 
-def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[int, ...], set[str]]:
+def _parse_select(sql: str) -> exp.Select:
+    """Parse one bounded SELECT before consulting the available table scope."""
     if len(sql) > 16_384:
         raise QueryError("The SQL query is too long.")
     try:
@@ -225,10 +226,15 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
         raise QueryError("The SQL query could not be parsed.") from exc
     if len(parsed) != 1 or not isinstance(parsed[0], exp.Select):
         raise QueryError("Only one plain SELECT query is permitted.")
-    query = parsed[0]
+    return parsed[0]
+
+
+def _query_tables(
+    query: exp.Select, tables: Mapping[str, Table]
+) -> tuple[dict[str, Table], dict[str, str]]:
+    """Resolve SQL table aliases only against the server-selected business tables."""
     aliases: dict[str, Table] = {}
     names: dict[str, str] = {}
-    used: set[str] = set()
     for table_node in query.find_all(exp.Table):
         name = table_node.name.casefold()
         alias = table_node.alias_or_name.casefold()
@@ -236,11 +242,13 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
             raise QueryError("The SQL query references an unavailable table or alias.")
         aliases[alias] = tables[name]
         names[alias] = name
-        used.add(name)
     if not aliases:
         raise QueryError("A query must read an available business table.")
-    _validate_joins(query, aliases, names)
+    return aliases, names
 
+
+def _expand_projections(query: exp.Select, aliases: Mapping[str, Table]) -> None:
+    """Expand stars into explicit scoped columns so money positions remain identifiable."""
     expanded: list[exp.Expr] = []
     for projection in query.expressions:
         if isinstance(projection, exp.Star) or (
@@ -258,6 +266,39 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
             expanded.append(projection)
     query.set("expressions", expanded)
 
+
+def _validate_money_filter(node: exp.Expr, aliases: Mapping[str, Table]) -> None:
+    """Require integer-cent operands in monetary predicates and permit only NULL IS checks."""
+    if isinstance(node, _COMPARISONS):
+        left, right = node.left, node.right
+        if _is_money(left, aliases) or _is_money(right, aliases):
+            if not (_typed_money_operand(left, aliases) and _typed_money_operand(right, aliases)):
+                raise QueryError("Compare money only with integer cents or another money column.")
+    if isinstance(node, exp.Between) and _is_money(node.this, aliases):
+        low = cast(exp.Expr, node.args["low"])
+        high = cast(exp.Expr, node.args["high"])
+        if not (_typed_money_operand(low, aliases) and _typed_money_operand(high, aliases)):
+            raise QueryError("Monetary bounds must use integer cents.")
+    if isinstance(node, exp.In) and _is_money(node.this, aliases):
+        if not all(_typed_money_operand(value, aliases) for value in node.expressions):
+            raise QueryError("Monetary lists must use integer cents.")
+    if isinstance(node, exp.Is) and _is_money(node.this, aliases):
+        if not isinstance(node.expression, exp.Null):
+            raise QueryError("IS comparisons on money support only NULL checks.")
+
+
+def _validate_numeric_coercion(node: exp.Expr, aliases: Mapping[str, Table]) -> None:
+    """Preserve exact monetary and percentage types across functions and text patterns."""
+    if isinstance(node, (exp.Lower, exp.Upper, exp.Length, exp.Coalesce, exp.Like)):
+        if any(
+            _is_money(column, aliases) or _resolve_column(column, aliases)[1] == "discount_percent"
+            for column in node.find_all(exp.Column)
+        ):
+            raise QueryError("Monetary and percentage values cannot be coerced by SQL functions.")
+
+
+def _validate_nodes(query: exp.Select, aliases: Mapping[str, Table]) -> None:
+    """Enforce the AST allowlist, column scope, numeric literals and exact money rules."""
     for node in query.walk():
         if type(node) not in _ALLOWED_NODES:
             raise QueryError(
@@ -268,32 +309,8 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
                 raise QueryError("Numeric SQL literals must be nonnegative signed-64-bit integers.")
         if isinstance(node, exp.Column) and not node.is_star:
             _resolve_column(node, aliases)
-        if isinstance(node, (exp.Lower, exp.Upper, exp.Length, exp.Coalesce)):
-            if any(_is_money(column, aliases) for column in node.find_all(exp.Column)):
-                raise QueryError("Monetary values cannot be coerced by SQL functions.")
-        if isinstance(node, _COMPARISONS):
-            left, right = node.left, node.right
-            if _is_money(left, aliases) or _is_money(right, aliases):
-                if not (
-                    _typed_money_operand(left, aliases) and _typed_money_operand(right, aliases)
-                ):
-                    raise QueryError(
-                        "Compare money only with integer cents or another money column."
-                    )
-        if isinstance(node, exp.Between) and _is_money(node.this, aliases):
-            low = cast(exp.Expr, node.args["low"])
-            high = cast(exp.Expr, node.args["high"])
-            if not (_typed_money_operand(low, aliases) and _typed_money_operand(high, aliases)):
-                raise QueryError("Monetary bounds must use integer cents.")
-        if isinstance(node, exp.In) and _is_money(node.this, aliases):
-            if not all(_typed_money_operand(value, aliases) for value in node.expressions):
-                raise QueryError("Monetary lists must use integer cents.")
-        if isinstance(node, exp.Like):
-            if any(_is_money(column, aliases) for column in node.find_all(exp.Column)):
-                raise QueryError("Monetary values cannot be converted to text patterns.")
-        if isinstance(node, exp.Is) and _is_money(node.this, aliases):
-            if not isinstance(node.expression, exp.Null):
-                raise QueryError("IS comparisons on money support only NULL checks.")
+        _validate_numeric_coercion(node, aliases)
+        _validate_money_filter(node, aliases)
         if isinstance(node, _AGGREGATES):
             argument = _direct(node.this)
             if not isinstance(argument, exp.Column):
@@ -301,14 +318,9 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
             if isinstance(node, exp.Avg) and not _is_money(argument, aliases):
                 raise QueryError("AVG is supported only for exact monetary columns.")
 
-    money_indexes: list[int] = []
-    for index, projection in enumerate(query.expressions):
-        value = _direct(projection)
-        if _is_money(value, aliases) or (
-            isinstance(value, _AGGREGATES) and _is_money(_direct(value.this), aliases)
-        ):
-            money_indexes.append(index)
 
+def _prepare_execution(query: exp.Select, aliases: Mapping[str, Table]) -> exp.Select:
+    """Adapt validated monetary aggregates to exact worker functions and cap output rows."""
     for aggregate in list(query.find_all(exp.Sum, exp.Avg)):
         if _is_money(_direct(aggregate.this), aliases):
             replacement = exp.Anonymous(
@@ -323,8 +335,23 @@ def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[i
         if not isinstance(value, exp.Literal) or not value.is_int:
             raise QueryError("LIMIT requires a nonnegative integer literal.")
         requested = min(int(value.this), requested)
-    query = query.limit(requested)
-    return query.sql(dialect="sqlite"), tuple(money_indexes), used
+    return query.limit(requested)
+
+
+def _validate_query(sql: str, tables: Mapping[str, Table]) -> tuple[str, tuple[int, ...], set[str]]:
+    """Validate the complete query before applying exact aggregates and result bounds."""
+    query = _parse_select(sql)
+    aliases, names = _query_tables(query, tables)
+    _validate_joins(query, aliases, names)
+    _expand_projections(query, aliases)
+    _validate_nodes(query, aliases)
+    money_indexes = tuple(
+        index
+        for index, projection in enumerate(query.expressions)
+        if _is_money(projection, aliases)
+    )
+    query = _prepare_execution(query, aliases)
+    return query.sql(dialect="sqlite"), money_indexes, set(names.values())
 
 
 class QueryEngine:
