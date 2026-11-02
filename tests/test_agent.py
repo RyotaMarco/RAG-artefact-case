@@ -27,19 +27,13 @@ from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 
-from emporio_agent.agent import (
-    ConversationAccess,
-    StoreTools,
-    build_agent,
-    chat_messages,
-    close_agent,
-    conversation_token,
-    run_chat,
-)
+from emporio_agent.access import ConversationAccess, conversation_token
+from emporio_agent.agent import build_agent, chat_messages, close_agent, run_chat
 from emporio_agent.config import Settings
 from emporio_agent.documents import PolicyIndex
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine
+from emporio_agent.tools import StoreTools
 
 
 def test_policy_tool_keeps_safe_provider_recovery_guidance(tmp_path: Path) -> None:

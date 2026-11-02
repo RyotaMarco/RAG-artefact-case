@@ -7,16 +7,11 @@ import httpx2
 import streamlit as st
 from agno.agent import Agent
 
-from emporio_agent.agent import (
-    StoreTools,
-    build_agent,
-    chat_messages,
-    close_agent,
-    conversation_token,
-    run_chat,
-)
+from emporio_agent.access import conversation_token
+from emporio_agent.agent import build_agent, chat_messages, close_agent, run_chat
 from emporio_agent.config import Settings
 from emporio_agent.runtime import Snapshot, StoreRuntime
+from emporio_agent.tools import StoreTools
 
 logger = logging.getLogger(__name__)
 _CAPABILITY_LABELS = {

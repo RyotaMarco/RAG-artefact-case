@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 from agent_fixtures import manual_snapshot, small_snapshot
 
-from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
+from emporio_agent.access import ConversationAccess, conversation_token
 from emporio_agent.rulings import RULINGS_FILE, StoreRulings, load_rulings
 from emporio_agent.runtime import Snapshot
+from emporio_agent.tools import StoreTools
 
 DATA = Path(__file__).parents[1] / "data"
 

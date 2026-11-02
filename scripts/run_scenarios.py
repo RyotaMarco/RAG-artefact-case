@@ -16,7 +16,8 @@ from zoneinfo import ZoneInfo
 
 import httpx2
 
-from emporio_agent.agent import build_agent, close_agent, conversation_token, run_chat
+from emporio_agent.access import conversation_token
+from emporio_agent.agent import build_agent, close_agent, run_chat
 from emporio_agent.config import Settings
 from emporio_agent.runtime import Snapshot, StoreRuntime
 
