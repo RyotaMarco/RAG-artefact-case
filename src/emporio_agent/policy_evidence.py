@@ -1,55 +1,70 @@
-"""Manual quotes each deterministic store rule depends on, and internal-contact masking."""
+"""Manual values and quotes each deterministic store rule depends on, and contact masking."""
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import time
 
 from emporio_agent.contacts import EMAIL, PHONE, phone_digits
 from emporio_agent.documents import Citation, PolicySection
+from emporio_agent.money import parse_customer_amount
 
 MASK = "[contato interno omitido]"
 _WHATSAPP = re.compile(r"canal de whatsapp\s+(\(\d{2}\)\s*\d{4,5}-\d{4})", re.IGNORECASE)
+_MONEY = r"(\d[\d.]*,\d{2})"
+_CLOCK = r"(\d{1,2}):(\d{2})\s+às\s+(\d{1,2}):(\d{2})"
 
 # A tool applies each rule only while the active manual still contains these quotes in the
-# named section, so a changed manual disables the rule instead of keeping a stale value.
+# named section. The numbers themselves are read from the manual (ManualValues), so a changed
+# amount or deadline is picked up, and a missing or contradictory one disables the rule.
 RULE_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
-    "hours": (
-        ("2.", "Segunda a Sexta-feira 09:00 às 18:00"),
-        ("2.", "Sábado 09:00 às 13:00"),
-        ("2.", "Domingo e Feriados Fechado"),
-    ),
+    "hours": (("2.", "Domingo e Feriados Fechado"),),
     "regret": (
         ("4.1", "Direito de Arrependimento (Compras Online)"),
-        ("4.1", "em até 7 (sete) dias corridos após o recebimento do produto"),
         ("4.1", "embalagem original, sem sinais de uso, com todos os acessórios e manuais"),
-        ("4.1", "na mesma forma de pagamento original em até 10 dias úteis"),
+        ("4.1", "na mesma forma de pagamento original"),
         ("4.1", "O frete de devolução é por conta da loja em caso de arrependimento"),
     ),
-    "preference": (
-        ("4.3", "Trocas por preferência (cor, modelo, tamanho) são permitidas em até 7"),
-    ),
+    "preference": (("4.3", "Trocas por preferência (cor, modelo, tamanho) são permitidas"),),
     "not_exchangeable": (
         ("4.4", "Instrumentos com personalização ou ajustes sob encomenda"),
         ("4.4", "venda final"),
         ("4.4", "Boquilhas de instrumentos de sopro"),
     ),
     "defect": (
-        ("4.2", "podem ser trocados em até 30 (trinta) dias corridos após a compra"),
-        ("4.2", "Após os 30 dias, o cliente deve acionar a garantia diretamente com o fabricante"),
+        ("4.2", "o cliente deve acionar a garantia diretamente com o fabricante"),
         ("4.2", "pode intermediar o processo mediante solicitação"),
-        ("8.2", "pode variar de 6 meses a 2 anos"),
+        ("8.2", "garantia própria"),
     ),
-    "metro_shipping": (
-        ("5.1", "Frete grátis para pedidos acima de R$ 500,00"),
-        ("5.1", "taxa fixa de R$ 35,00"),
-    ),
-    "complaints": (("7.3", "Prazo de retorno: 24 horas úteis"),),
-    "mixed_payment": (
-        (
-            "3.1",
-            "Combinação de formas de pagamento: permitida (ex.: PIX + cartão) "
-            "para compras acima de R$ 2.000,00",
-        ),
-    ),
+    "metro_shipping": (("5.1", "Frete grátis para pedidos acima de"),),
+    "complaints": (("7.3", "Prazo de retorno"),),
+    "mixed_payment": (("3.1", "Combinação de formas de pagamento: permitida (ex.: PIX + cartão)"),),
+}
+
+
+@dataclass(frozen=True)
+class ManualValues:
+    """Numbers and terms read from the manual, or None when absent or contradictory."""
+
+    weekly_hours: Mapping[int, tuple[time, time]] | None = None
+    metro_threshold_cents: int | None = None
+    metro_fee_cents: int | None = None
+    regret_days: int | None = None
+    refund_business_days: int | None = None
+    preference_days: int | None = None
+    defect_days: int | None = None
+    complaint_hours: int | None = None
+    manufacturer_warranty: str | None = None
+
+
+# Values each rule needs in addition to its quotes.
+RULE_VALUES: dict[str, tuple[str, ...]] = {
+    "hours": ("weekly_hours",),
+    "regret": ("regret_days", "refund_business_days"),
+    "preference": ("preference_days",),
+    "defect": ("defect_days", "manufacturer_warranty"),
+    "metro_shipping": ("metro_threshold_cents", "metro_fee_cents"),
+    "complaints": ("complaint_hours",),
 }
 
 
@@ -61,18 +76,33 @@ def _matches(title: str, prefix: str) -> bool:
     return title == prefix or title.split(maxsplit=1)[0] == prefix
 
 
+def _unique(pattern: str, text: str) -> tuple[str, ...] | None:
+    """Return the groups of a pattern stated exactly once (repeats must agree), else None."""
+    found = {match.groups() for match in re.finditer(pattern, text, re.IGNORECASE)}
+    return found.pop() if len(found) == 1 else None
+
+
+def _slot(groups: tuple[str, ...] | None) -> tuple[time, time] | None:
+    if groups is None:
+        return None
+    opening, closing = time(int(groups[0]), int(groups[1])), time(int(groups[2]), int(groups[3]))
+    return (opening, closing) if opening < closing else None
+
+
 class PolicyEvidence:
-    """Locate rule evidence and the public contacts in the active manual sections."""
+    """Locate rule evidence, manual values and the public contacts in the manual sections."""
 
     def __init__(self, sections: Sequence[PolicySection]) -> None:
-        """Find each rule's quotes; rules with any missing quote stay disabled."""
+        """Find each rule's quotes and values; rules missing either stay disabled."""
         self._sections = tuple(sections)
         self.whatsapp = self._whatsapp()
         self.email = self._email()
+        self.values = self._values()
         self._found: dict[str, tuple[Citation, ...]] = {}
         for rule, quotes in RULE_EVIDENCE.items():
             located = [self._locate(section, quote) for section, quote in quotes]
-            if all(located):
+            needed = RULE_VALUES.get(rule, ())
+            if all(located) and all(getattr(self.values, name) is not None for name in needed):
                 self._found[rule] = tuple(
                     dict.fromkeys(c for group in located if group for c in group)
                 )
@@ -83,6 +113,47 @@ class PolicyEvidence:
             if _matches(section.title, prefix) and _flat(quote) in body:
                 return section.citations
         return None
+
+    def _text(self, prefix: str) -> str:
+        return " ".join(
+            _flat(section.text) for section in self._sections if _matches(section.title, prefix)
+        )
+
+    def _days(self, prefix: str, pattern: str) -> int | None:
+        groups = _unique(pattern, self._text(prefix))
+        return int(groups[0]) if groups else None
+
+    def _values(self) -> ManualValues:
+        hours = self._text("2.")
+        weekdays = _slot(_unique(r"segunda a sexta-feira\s+" + _CLOCK, hours))
+        saturday = _slot(_unique(r"sábado\s+" + _CLOCK, hours))
+        sunday_closed = re.search(r"domingo e feriados fechado", hours, re.IGNORECASE)
+        weekly = (
+            {day: weekdays for day in range(5)} | {5: saturday}
+            if weekdays and saturday and sunday_closed
+            else None
+        )
+        shipping = self._text("5.1")
+        free = _unique(r"frete grátis para pedidos acima de r\$\s*" + _MONEY, shipping)
+        fee = _unique(
+            r"pedidos abaixo de r\$\s*" + _MONEY + r",\s*taxa fixa de r\$\s*" + _MONEY, shipping
+        )
+        threshold = parse_customer_amount(free[0]) if free else None
+        below = parse_customer_amount(fee[0]) if fee else None
+        defect = self._days("4.2", r"trocados em até (\d+) \(\w+\) dias corridos após a compra")
+        after = self._days("4.2", r"após os (\d+) dias")
+        warranty = _unique(r"pode variar de ([^.]+?)\.", self._text("8.2"))
+        return ManualValues(
+            weekly_hours=weekly,
+            metro_threshold_cents=threshold if threshold == below else None,
+            metro_fee_cents=parse_customer_amount(fee[1]) if fee and threshold == below else None,
+            regret_days=self._days("4.1", r"em até (\d+) \(\w+\) dias corridos após o recebimento"),
+            refund_business_days=self._days("4.1", r"em até (\d+) dias úteis"),
+            preference_days=self._days("4.3", r"permitidas em até (\d+) dias"),
+            defect_days=defect if defect == after else None,
+            complaint_hours=self._days("7.3", r"prazo de retorno:\s*(\d+) horas úteis"),
+            manufacturer_warranty=warranty[0] if warranty else None,
+        )
 
     def _whatsapp(self) -> str | None:
         found = {
@@ -103,7 +174,7 @@ class PolicyEvidence:
         return found.pop() if len(found) == 1 else None
 
     def has(self, *rules: str) -> bool:
-        """Report whether the active manual contains the evidence for every named rule."""
+        """Report whether the active manual supports every named rule (quotes and values)."""
         return all(rule in self._found for rule in rules)
 
     def citations(self, *rules: str) -> tuple[Citation, ...]:

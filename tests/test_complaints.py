@@ -22,7 +22,8 @@ PROTOCOL = re.compile(r"REC-20261102-[A-HJ-NP-Z2-9]{6}")
 @pytest.fixture(scope="module")
 def snapshot() -> Snapshot:
     """Combine fixture orders with the delivered manual's complaint process."""
-    return replace(small_snapshot(), policies=manual_snapshot().policies)
+    manual = manual_snapshot()
+    return replace(small_snapshot(), policies=manual.policies, rulings=manual.rulings)
 
 
 def tools(snapshot: Snapshot, tmp_path: Path, token: str | None = None) -> StoreTools:
@@ -105,6 +106,7 @@ def test_personal_data_is_redacted_before_storage(tmp_path: Path) -> None:
         501,
         "Me liguem no (67) 99876-5432 ou 67 3333-4444, email ana@exemplo.com, CPF 123.456.789-09.",
         NOW,
+        limit=3,
     )
     (summary,) = rows(tmp_path)[0][3:4]
     assert summary == (
@@ -116,12 +118,12 @@ def test_summary_length_and_conversation_limit(tmp_path: Path) -> None:
     """Empty summaries are refused and one conversation cannot flood the table."""
     database = tmp_path / "sessions.sqlite3"
     with pytest.raises(ValueError, match="10 to 1000"):
-        record_complaint(database, "conversation", 501, "   ruim  ", NOW)
+        record_complaint(database, "conversation", 501, "   ruim  ", NOW, limit=3)
     for _ in range(3):
-        record_complaint(database, "conversation", 501, "Produto com defeito.", NOW)
+        record_complaint(database, "conversation", 501, "Produto com defeito.", NOW, limit=3)
     with pytest.raises(ValueError, match="maximum number"):
-        record_complaint(database, "conversation", 501, "Produto com defeito.", NOW)
-    record_complaint(database, "another", 502, "Produto com defeito.", NOW)
+        record_complaint(database, "conversation", 501, "Produto com defeito.", NOW, limit=3)
+    record_complaint(database, "another", 502, "Produto com defeito.", NOW, limit=3)
     assert len(rows(tmp_path)) == 4
 
 
@@ -145,5 +147,5 @@ def test_existing_complaint_table_gains_the_email_column(tmp_path: Path) -> None
             "INSERT INTO complaints (protocol, created_at, order_id, conversation, summary) "
             "VALUES ('REC-OLD', 'x', 1, 'c', 'Antiga reclamação')"
         )
-    record_complaint(database, "c2", 501, "Produto com defeito.", NOW, email="a@b.com")
+    record_complaint(database, "c2", 501, "Produto com defeito.", NOW, limit=3, email="a@b.com")
     assert [row[5] for row in rows(tmp_path)] == [None, "a@b.com"]

@@ -22,6 +22,7 @@ from emporio_agent.documents import (
     build_index,
 )
 from emporio_agent.policies import extract_rules
+from emporio_agent.rulings import load_rulings
 from emporio_agent.runtime import Snapshot
 
 type JsonObject = dict[str, object]
@@ -318,4 +319,5 @@ def manual_snapshot() -> Snapshot:
     with localcontext() as context:
         context.prec = 120
         rules = extract_rules(index.sections)
-    return Snapshot("manual-fixture", build_catalog(sources), index, rules)
+    rulings, _ = load_rulings(Path(__file__).parents[1] / "data")
+    return Snapshot("manual-fixture", build_catalog(sources), index, rules, rulings)

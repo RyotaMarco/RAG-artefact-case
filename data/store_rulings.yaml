@@ -1,0 +1,35 @@
+# Business decisions for points the store manual (políticas_da_loja.pdf) leaves ambiguous or
+# open. They are business rules, not technical choices: each one would be confirmed with the
+# client in an alignment call. Values stated in the manual itself (amounts, deadlines, opening
+# hours) are read from the PDF and are not repeated here.
+#
+# The app validates this file on load and reloads it when it changes. A missing or invalid
+# file disables the rules that depend on it; the agent then refers customers to staff.
+
+shipping:
+  # Manual: free shipping "acima de R$ 500,00" and a fixed fee "abaixo de R$ 500,00".
+  # false = an order of exactly the threshold pays the fee.
+  free_at_exact_threshold: false
+  # true = the threshold applies to the final amount paid, after promotions and the PIX
+  # discount; false = to the catalog total before payment discounts.
+  threshold_on_final_amount: true
+
+returns:
+  # Manual: preference exchanges "em até 7 dias", without saying when the days start.
+  preference_counts_from: receipt   # receipt | purchase
+  # In-store preference exchanges: "whatsapp" refers the customer to staff without a
+  # deadline; "window" applies the same window from the purchase date.
+  in_store_preference: whatsapp     # whatsapp | window
+
+combined_payment:
+  # Manual: combining methods is allowed "ex.: PIX + cartão" above a threshold.
+  # Boleto is excluded because it takes up to 3 business days to clear.
+  # Combined payments use catalog prices, without the PIX discount.
+  methods: [pix, credit, debit]
+
+complaints:
+  # Manual: "registrar a reclamação e encaminhar para o responsável".
+  # Protection against flooding from a single conversation.
+  max_per_conversation: 3
+  # Store the verified order's email so staff can reply.
+  keep_order_email: true
