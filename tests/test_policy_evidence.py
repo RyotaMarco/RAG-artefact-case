@@ -12,15 +12,9 @@ from agent_fixtures import FixedEmbedder, manual_snapshot, small_snapshot
 
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import PolicyIndex, PolicySection
-from emporio_agent.policy_evidence import (
-    MASK,
-    RULE_EVIDENCE,
-    PolicyEvidence,
-    metro_shipping_cents,
-    opening_status,
-    return_window,
-)
+from emporio_agent.policy_evidence import MASK, RULE_EVIDENCE, PolicyEvidence
 from emporio_agent.runtime import Snapshot
+from emporio_agent.store_rules import metro_shipping_cents, opening_status, return_window
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")

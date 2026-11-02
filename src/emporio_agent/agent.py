@@ -31,16 +31,16 @@ from emporio_agent.money import (
     split_installments,
 )
 from emporio_agent.policies import PolicyUnavailableError, normalize_method
-from emporio_agent.policy_evidence import (
+from emporio_agent.policy_evidence import PolicyEvidence
+from emporio_agent.runtime import Snapshot
+from emporio_agent.sql import QueryEngine, QueryError
+from emporio_agent.store_rules import (
     RETURN_REASONS,
     SPLIT_METHODS,
-    PolicyEvidence,
     metro_shipping_cents,
     opening_status,
     return_window,
 )
-from emporio_agent.runtime import Snapshot
-from emporio_agent.sql import QueryEngine, QueryError
 
 INSTRUCTIONS = """
 You are the virtual assistant of Empório da Música, a musical instrument store in Campo Grande -
