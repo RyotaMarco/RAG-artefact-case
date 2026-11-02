@@ -244,3 +244,35 @@ def test_supported_settlement_days_are_source_values() -> None:
     )
     assert not rules.conflicts
     assert rules.quote(Decimal("100.00"), payment_method="boleto").total == Decimal("100.00")
+
+
+TIERS = (
+    "Parcelamento em até 3x: sem juros, sem valor mínimo de parcela (exceto abaixo de R$ 50,00). "
+    "Parcelamento de 4x a 6x: sem juros, parcela mínima de R$ 80,00. "
+    "Parcelamento de 7x a 12x: sem juros, parcela mínima de R$ 100,00."
+)
+
+
+def test_matching_payment_table_restates_the_highest_tier() -> None:
+    """The section 3 credit row summarizes the 7x-12x tier and is not a conflict."""
+    table = section("Cartão de Crédito Até 12x sem juros Parcela mínima de R$ 100,00")
+    rules = extract_rules((table, section(TIERS)))
+    assert not rules.conflicts
+    assert table.citations[0] in rules.citations
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "Cartão de Crédito Até 12x sem juros Parcela mínima de R$ 90,00",
+        "Cartão de Crédito Até 10x sem juros Parcela mínima de R$ 100,00",
+    ],
+)
+def test_diverging_payment_table_blocks_every_quote(row: str) -> None:
+    """A table that disagrees with section 3.1 needs staff instead of a chosen value."""
+    rules = extract_rules((section(row), section(TIERS)))
+    assert rules.conflicts == (
+        "The payment table's credit row disagrees with the installment tiers.",
+    )
+    with pytest.raises(PolicyUnavailableError, match="staff confirmation"):
+        rules.quote(Decimal("1200.00"), payment_method="credit", installments=12)
