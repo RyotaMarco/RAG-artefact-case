@@ -194,6 +194,17 @@ def _day(value: str | None, label: str, today: date) -> date | None:
     return parsed
 
 
+def _missing_date(channel: str, *, defect: bool = False) -> str:
+    if channel == "store":
+        return (
+            "Ask the customer for the purchase date; in-store purchases have no separate "
+            "receipt date."
+        )
+    if defect:
+        return "Ask the customer for the purchase date and the receipt date."
+    return "Ask the customer for the date the product was received."
+
+
 def _window(start: date, days: int, today: date) -> dict[str, object]:
     deadline = start + timedelta(days=days)
     return {
@@ -230,7 +241,7 @@ def return_window(
         return result
     if reason in {"regret", "preference"}:
         if received is None:
-            raise ValueError("Ask the customer for the date the product was received.")
+            raise ValueError(_missing_date(channel))
         result.update(_window(received, 7, today))
         result["conditions"] = (
             "Original packaging, unused, with all accessories and manuals."
@@ -239,7 +250,7 @@ def return_window(
         )
         return result
     if purchased is None or received is None:
-        raise ValueError("Ask the customer for the purchase date and the receipt date.")
+        raise ValueError(_missing_date(channel, defect=True))
     result["store_exchange"] = _window(purchased, 30, today)
     result["legal_warranty_intermediation"] = _window(received, 90, today)
     result["conditions"] = (

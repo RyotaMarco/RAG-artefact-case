@@ -229,6 +229,8 @@ def test_return_windows_count_calendar_days_inclusively(
         ("regret", "online", "2026-11-01", None, "date the product was received"),
         ("preference", "online", "2026-11-01", None, "date the product was received"),
         ("defect", "online", None, "2026-11-01", "purchase date and the receipt date"),
+        ("preference", "store", None, None, "in-store purchases have no separate receipt date"),
+        ("defect", "store", None, None, "in-store purchases have no separate receipt date"),
         ("regret", "phone", "2026-11-01", "2026-11-02", "online or in the physical store"),
         ("refund", "online", "2026-11-01", "2026-11-02", "regret, preference or defect"),
         ("regret", "online", "2026-11-01", "2026-11-21", "cannot be in the future"),
@@ -500,3 +502,20 @@ def test_split_payment_reads_the_amount_as_the_customer_wrote_it(
     result = split(tools(order_snapshot(manual, 175002), tmp_path), "pix", typed, "credit")
     payments = cast(list[dict[str, object]], result["payments"])
     assert [payment["amount"] for payment in payments] == ["R$ 1.000,00", "R$ 1.000,01"]
+
+
+@pytest.mark.parametrize(
+    ("first", "change"),
+    [
+        ("debit", {"single_payment_methods": ("boleto",)}),
+        ("pix", {"pix_rate": None}),
+    ],
+)
+def test_split_payment_requires_methods_the_manual_lists(
+    manual: Snapshot, tmp_path: Path, first: str, change: dict[str, object]
+) -> None:
+    """A method the active manual no longer lists is refused, as calculate_quote does."""
+    snapshot = order_snapshot(manual, 175002)
+    snapshot = replace(snapshot, rules=replace(snapshot.rules, **change))
+    result = split(tools(snapshot, tmp_path), first, "1000", "credit")
+    assert f"does not list {first} payments" in str(result["error"])

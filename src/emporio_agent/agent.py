@@ -513,6 +513,37 @@ class StoreTools:
         except (ValueError, ArithmeticError) as error:
             return {"error": str(error)}
 
+    def _split_part(
+        self, method: str, amount: int, count: int
+    ) -> tuple[dict[str, object], tuple[Citation, ...]]:
+        """Validate one part of a combined payment against the manual's payment rules."""
+        rules = self.snapshot.rules
+        if (method == "debit" and "debit" not in rules.single_payment_methods) or (
+            method == "pix" and rules.pix_rate is None
+        ):
+            raise PolicyUnavailableError(
+                f"The active manual does not list {method} payments. Refer to staff."
+            )
+        citations: tuple[Citation, ...] = ()
+        if method == "credit":
+            with localcontext() as context:
+                context.prec = 120
+                quote = rules.quote(
+                    Decimal(amount) / 100, payment_method="credit", installments=count
+                )
+            citations = quote.citations
+        elif count != 1:
+            raise ValueError(f"The {method} part is paid in a single payment.")
+        payment: dict[str, object] = {
+            "method": method,
+            "amount": format_brl(amount),
+            "installments": count,
+            "installment_amounts": [
+                format_brl(value) for value in split_installments(amount, count)
+            ],
+        }
+        return payment, citations
+
     def calculate_split_payment(
         self,
         items: list[dict[str, int]],
@@ -569,31 +600,12 @@ class StoreTools:
                 raise ValueError(
                     f"The first amount must be above zero and below {format_brl(total)}."
                 )
-            payments: list[dict[str, object]] = []
-            citations: list[Citation] = list(rules.citations)
-            for method, amount, count in (
-                (methods[0], first, first_installments),
-                (methods[1], total - first, second_installments),
-            ):
-                if method == "credit":
-                    with localcontext() as context:
-                        context.prec = 120
-                        quote = rules.quote(
-                            Decimal(amount) / 100, payment_method="credit", installments=count
-                        )
-                    citations.extend(quote.citations)
-                elif count != 1:
-                    raise ValueError(f"The {method} part is paid in a single payment.")
-                payments.append(
-                    {
-                        "method": method,
-                        "amount": format_brl(amount),
-                        "installments": count,
-                        "installment_amounts": [
-                            format_brl(value) for value in split_installments(amount, count)
-                        ],
-                    }
-                )
+            parts = [
+                self._split_part(methods[0], first, first_installments),
+                self._split_part(methods[1], total - first, second_installments),
+            ]
+            payments = [payment for payment, _ in parts]
+            citations = [*rules.citations, *(c for _, found in parts for c in found)]
             references = _citations(
                 tuple(dict.fromkeys((*citations, *self.evidence.citations("mixed_payment"))))
             )
