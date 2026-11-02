@@ -20,7 +20,10 @@ def test_money_never_round_trips_through_float() -> None:
     """Preserve cents beyond binary floating-point integer precision."""
     assert parse_money_cents("90071992547409.93") == 9007199254740993
     assert parse_money_cents("92233720368547758.07") == MAX_CENTS
-    assert format_brl(219900) == "BRL 2,199.00"
+    assert format_brl(219900) == "R$ 2.199,00"
+    assert format_brl(5) == "R$ 0,05"
+    assert format_brl(129990) == "R$ 1.299,90"
+    assert format_brl(100000000) == "R$ 1.000.000,00"
 
 
 @pytest.mark.parametrize(

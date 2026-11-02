@@ -278,9 +278,9 @@ def test_metro_shipping_is_free_only_above_five_hundred_reais(final_cents: int, 
 @pytest.mark.parametrize(
     ("product_id", "method", "total", "fee", "with_shipping"),
     [
-        (89, "credit", "BRL 549.00", "BRL 0.00", "BRL 549.00"),
-        (89, "pix", "BRL 521.55", "BRL 0.00", "BRL 521.55"),
-        (121, "credit", "BRL 439.20", "BRL 35.00", "BRL 474.20"),
+        (89, "credit", "R$ 549,00", "R$ 0,00", "R$ 549,00"),
+        (89, "pix", "R$ 521,55", "R$ 0,00", "R$ 521,55"),
+        (121, "credit", "R$ 439,20", "R$ 35,00", "R$ 474,20"),
     ],
 )
 def test_quote_applies_metro_shipping_to_the_final_amount_paid(
