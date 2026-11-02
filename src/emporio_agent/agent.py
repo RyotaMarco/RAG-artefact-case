@@ -19,6 +19,7 @@ from agno.models.message import Message
 from agno.run.base import RunStatus
 from anthropic import Anthropic
 
+from emporio_agent.complaints import record_complaint
 from emporio_agent.config import Settings
 from emporio_agent.documents import Citation
 from emporio_agent.money import check_cents, discounted_cents, format_brl, split_installments
@@ -277,6 +278,42 @@ class StoreTools:
         )
         return result
 
+    def register_complaint(self, summary: str) -> dict[str, object]:
+        """Record a complaint about the verified order for staff follow-up.
+
+        Parameters:
+            summary: A short description of the problem, without personal data.
+
+        Returns:
+            The protocol, the response time and the WhatsApp message to send, or an error.
+        """
+        if not self.facts.has("complaints", "whatsapp"):
+            return {
+                "error": "The active manual does not confirm the complaint process. Refer the "
+                "customer to staff."
+            }
+        order_id = self.access.verified_order()
+        if order_id is None:
+            return {
+                "error": "No verified order. Ask for the order number and email and call "
+                "verify_order first. Without an order, refer the customer to WhatsApp "
+                f"{self.facts.whatsapp} without a protocol."
+            }
+        try:
+            protocol = record_complaint(
+                self.access.database, self.access.identity, order_id, summary, self.now()
+            )
+        except ValueError as error:
+            return {"error": str(error)}
+        self.sources.extend(_citations(self.facts.citations("complaints")))
+        return {
+            "protocol": protocol,
+            "order_id": order_id,
+            "response_time": "Up to 24 business hours.",
+            "whatsapp": self.facts.whatsapp,
+            "whatsapp_message": f"Olá! Tenho uma reclamação registrada com o protocolo {protocol}.",
+        }
+
     def verify_order(self, order_id: int, email: str) -> dict[str, object]:
         """Verify one order/contact pair before private order queries.
 
@@ -458,6 +495,7 @@ def build_agent(
             tools.check_return_window,
             tools.search_policies,
             tools.verify_order,
+            tools.register_complaint,
             tools.query_data,
             tools.calculate_quote,
         ],
