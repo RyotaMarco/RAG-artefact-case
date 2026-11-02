@@ -20,6 +20,9 @@ RULE_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
     "regret": (
         ("4.1", "Direito de Arrependimento (Compras Online)"),
         ("4.1", "em até 7 (sete) dias corridos após o recebimento do produto"),
+        ("4.1", "embalagem original, sem sinais de uso, com todos os acessórios e manuais"),
+        ("4.1", "na mesma forma de pagamento original em até 10 dias úteis"),
+        ("4.1", "O frete de devolução é por conta da loja em caso de arrependimento"),
     ),
     "preference": (
         ("4.3", "Trocas por preferência (cor, modelo, tamanho) são permitidas em até 7"),

@@ -225,10 +225,11 @@ def test_return_window_asks_for_missing_or_invalid_customer_dates(
 
 
 def test_store_purchases_have_no_withdrawal_right() -> None:
-    """In-store regret points to the preference exchange instead of a deadline."""
+    """In-store regret is referred to WhatsApp, without a deadline or an offer."""
     result = return_window("regret", "store", "2026-11-18", None, TODAY)
     assert result["applicable"] is False
-    assert "preference exchange" in str(result["explanation"])
+    assert "Refer the customer to WhatsApp" in str(result["explanation"])
+    assert "do not offer an exchange" in str(result["explanation"])
     assert "deadline" not in result
 
 
@@ -543,3 +544,16 @@ def test_defect_after_thirty_days_goes_to_manufacturer_intermediation() -> None:
     assert "intermediate" in note
     assert "Never say the warranty has expired" in note
     assert "legal_warranty_intermediation" not in result
+
+
+def test_online_regret_states_every_condition_of_section_4_1() -> None:
+    """Packaging, refund method and term, return shipping and the WhatsApp channel."""
+    result = return_window("regret", "online", "2026-11-01", "2026-11-13", TODAY)
+    conditions = str(result["conditions"])
+    for part in (
+        "Original packaging",
+        "original payment method within 10 business days",
+        "store pays the return shipping",
+        "WhatsApp",
+    ):
+        assert part in conditions
