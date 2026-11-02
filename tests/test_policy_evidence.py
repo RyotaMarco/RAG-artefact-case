@@ -70,7 +70,9 @@ def test_a_missing_quote_disables_only_that_rule(manual: Snapshot, tmp_path: Pat
     policies = PolicyIndex(
         manual.policies.chunks, edited, FixedEmbedder(), manual.policies.fingerprint
     )
-    quote = tools(replace(manual, policies=policies), tmp_path).calculate_quote(89)
+    quote = tools(replace(manual, policies=policies), tmp_path).calculate_quote(
+        [{"product_id": 89}]
+    )
     assert "metro_region_shipping" not in quote
     assert "not confirmed" in str(quote["shipping_note"])
 
@@ -294,7 +296,7 @@ def test_quote_applies_metro_shipping_to_the_final_amount_paid(
 ) -> None:
     """A R$ 549,00 list price promoted to R$ 439,20 pays shipping; PIX stays above R$ 500."""
     store = tools(manual, tmp_path)
-    result = store.calculate_quote(product_id, payment_method=method)
+    result = store.calculate_quote([{"product_id": product_id}], payment_method=method)
     assert result["total"] == total
     assert result["metro_region_shipping"] == fee
     assert result["total_with_metro_shipping"] == with_shipping
@@ -307,6 +309,102 @@ def test_quote_applies_metro_shipping_to_the_final_amount_paid(
 
 def test_quote_withholds_shipping_without_a_confirming_manual(tmp_path: Path) -> None:
     """Fixture PDFs have no shipping clause, so no fee is invented."""
-    result = tools(small_snapshot(), tmp_path).calculate_quote(101)
+    result = tools(small_snapshot(), tmp_path).calculate_quote([{"product_id": 101}])
     assert "metro_region_shipping" not in result
     assert "not confirmed" in str(result["shipping_note"])
+
+
+def order_snapshot(manual: Snapshot, price_cents: int, promotion: str | None = None) -> Snapshot:
+    """Fixture products 101 (configurable) and 202 (R$ 249,99) under the real manual's rules."""
+    return replace(
+        small_snapshot(price_cents=price_cents, promotion_percent=promotion),
+        policies=manual.policies,
+        rules=manual.rules,
+    )
+
+
+BOTH = [{"product_id": 101, "quantity": 1}, {"product_id": 202, "quantity": 1}]
+
+
+@pytest.mark.parametrize(
+    ("price", "promotion", "method", "total", "fee", "with_shipping"),
+    [
+        (25001, None, "credit", "R$ 500,00", "R$ 35,00", "R$ 535,00"),
+        (25002, None, "credit", "R$ 500,01", "R$ 0,00", "R$ 500,01"),
+        (25002, None, "pix", "R$ 475,01", "R$ 35,00", "R$ 510,01"),
+        (30000, "10", "credit", "R$ 519,99", "R$ 0,00", "R$ 519,99"),
+        (30000, "10", "pix", "R$ 507,49", "R$ 0,00", "R$ 507,49"),
+    ],
+)
+def test_order_quote_uses_the_whole_order_for_pix_and_shipping(
+    manual: Snapshot,
+    tmp_path: Path,
+    price: int,
+    promotion: str | None,
+    method: str,
+    total: str,
+    fee: str,
+    with_shipping: str,
+) -> None:
+    """Shipping and PIX use the order total; PIX skips the promotional line (270,00 + 237,49)."""
+    store = tools(order_snapshot(manual, price, promotion), tmp_path)
+    result = store.calculate_quote(BOTH, payment_method=method)
+    assert result["total"] == total
+    assert result["metro_region_shipping"] == fee
+    assert result["total_with_metro_shipping"] == with_shipping
+    assert len(cast(list[object], result["items"])) == 2
+
+
+def test_mixed_pix_order_reports_promotion_and_non_stacking(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """Each line keeps its own promotion; the PIX note explains the promotional line."""
+    result = tools(order_snapshot(manual, 30000, "10"), tmp_path).calculate_quote(BOTH)
+    first, second = cast(list[dict[str, object]], result["items"])
+    assert (first["original_total"], first["current_catalog_total"]) == ("R$ 300,00", "R$ 270,00")
+    assert first["active_promotion_percent"] == "10"
+    assert second["current_catalog_total"] == "R$ 249,99"
+    assert result["order_original_total"] == "R$ 549,99"
+    assert result["order_catalog_total"] == "R$ 519,99"
+    assert result["policy_note"] == "PIX discount does not stack with a promotional price."
+
+
+def test_installment_minimum_applies_to_the_order_total(manual: Snapshot, tmp_path: Path) -> None:
+    """R$ 500,01 in 5x is R$ 100,00+ per installment, although each item alone is below R$ 80."""
+    store = tools(order_snapshot(manual, 25002), tmp_path)
+    result = store.calculate_quote(BOTH, payment_method="credit", installments=5)
+    assert result["installment_amounts"] == ["R$ 100,01"] + ["R$ 100,00"] * 4
+    alone = store.calculate_quote([{"product_id": 101}], payment_method="credit", installments=5)
+    assert "minimum" in str(alone["error"])
+
+
+@pytest.mark.parametrize(
+    ("items", "message"),
+    [
+        ([], "between 1 and 20"),
+        ([{"product_id": 101, "quantity": 3}, {"product_id": 101, "quantity": 3}], "exceeds"),
+        ([{"product_id": 101, "quantity": 0}], "positive quantity"),
+        ([{"quantity": 1}], "integer product_id"),
+        ([{"product_id": 999}], "Product 999 is not present"),
+        ([{"product_id": 136}], "Ibanez Bass 2X Electric Bass is not currently available"),
+    ],
+)
+def test_order_quote_rejects_invalid_or_unavailable_items(
+    manual: Snapshot, tmp_path: Path, items: list[dict[str, int]], message: str
+) -> None:
+    """Repeated products share one stock check and discontinued items are never quoted."""
+    snapshot = manual if message.startswith("Ibanez") else order_snapshot(manual, 10000)
+    result = tools(snapshot, tmp_path).calculate_quote(items)
+    assert message in str(result["error"])
+    assert "total" not in result
+
+
+def test_real_catalog_order_combines_regular_and_promotional_products(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """Shelby SN-100 (R$ 549,00) plus Ohana CK-20 (20% off R$ 549,00) quoted as one order."""
+    store = tools(manual, tmp_path)
+    order = [{"product_id": 89, "quantity": 1}, {"product_id": 121, "quantity": 1}]
+    credit = store.calculate_quote(order, payment_method="credit")
+    assert (credit["total"], credit["metro_region_shipping"]) == ("R$ 988,20", "R$ 0,00")
+    assert store.calculate_quote(order)["total"] == "R$ 960,75"
