@@ -115,6 +115,13 @@ def return_window(
             "WhatsApp for clarification; do not offer an exchange or alternative yourself."
         )
         return result
+    if reason == "preference" and channel == "store":
+        result["applicable"] = False
+        result["explanation"] = (
+            "Preference exchanges for in-store purchases are handled by staff. Refer the "
+            "customer to WhatsApp; do not calculate a deadline or promise an exchange."
+        )
+        return result
     if reason in {"regret", "preference"}:
         if received is None:
             raise ValueError(_missing_date(channel))
