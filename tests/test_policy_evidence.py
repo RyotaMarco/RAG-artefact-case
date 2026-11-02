@@ -632,3 +632,14 @@ def test_contradictory_or_missing_values_disable_their_rule(manual: Snapshot) ->
     assert evidence.values.complaint_hours is None
     assert not evidence.has("defect") and not evidence.has("complaints")
     assert evidence.has("regret", "preference", "metro_shipping", "hours")
+
+
+def test_online_withdrawal_needs_only_the_receipt_date(manual: Snapshot, tmp_path: Path) -> None:
+    """Site purchase received on 30/10: no purchase date is needed to answer."""
+    store = tools(manual, tmp_path)
+    store.now = lambda: datetime(2026, 11, 3, 10, 0, tzinfo=CAMPO_GRANDE)
+    result = store.check_return_window("regret", "online", received_on="2026-10-30")
+    assert (result["deadline"], result["within_window"]) == ("2026-11-06", True)
+    missing = store.check_return_window("regret", "online")
+    assert "date the product was received" in str(missing["error"])
+    assert "purchase date" not in str(missing["error"])
