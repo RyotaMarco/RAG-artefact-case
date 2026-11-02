@@ -21,6 +21,7 @@ from anthropic import Anthropic
 
 from emporio_agent.complaints import record_complaint
 from emporio_agent.config import Settings
+from emporio_agent.data import Row
 from emporio_agent.documents import Citation
 from emporio_agent.money import check_cents, discounted_cents, format_brl, split_installments
 from emporio_agent.policies import PolicyUnavailableError
@@ -88,8 +89,9 @@ Straight SELECT, key joins, typed filters, sorting, COUNT and controlled SUM/AVG
 No arithmetic, casts, subqueries, extensions or schema introspection. Never weaken a rejected query.
 Correct at most one recoverable query mistake; report authorization or capability errors directly.
 
-Use calculate_quote for discounts, payment-specific amounts and installments. Do not calculate
-money mentally or combine discounts yourself. The tool checks current stock, active promotions,
+Use calculate_quote for discounts, payment-specific amounts and installments, with every product
+of the order in one call. Do not calculate money mentally, add separate quotes or combine discounts
+yourself. The tool checks current stock, active promotions,
 source payment conditions, ambiguity and exact rounding. Show both original and promotional price
 when relevant. A quote is informational, not a purchase. If a payment rule is unsupported, cite the
 policy and refer the customer to staff. Never invent minimum installments or discount percentages.
@@ -348,19 +350,67 @@ class StoreTools:
             self.query_failures += 1
             return {"error": str(error)}
 
+    def _order_lines(self, items: list[dict[str, int]]) -> list[tuple[Row, int]]:
+        """Merge repeated products and check each one's status and stock for the whole order."""
+        if not 1 <= len(items) <= 20:
+            raise ValueError("Provide between 1 and 20 order items.")
+        quantities: dict[int, int] = {}
+        for item in items:
+            product_id, quantity = item.get("product_id"), item.get("quantity", 1)
+            if type(product_id) is not int or type(quantity) is not int or quantity < 1:
+                raise ValueError("Each item needs an integer product_id and a positive quantity.")
+            quantities[product_id] = quantities.get(product_id, 0) + quantity
+        lines: list[tuple[Row, int]] = []
+        for product_id, quantity in quantities.items():
+            product = next(
+                (
+                    row
+                    for row in self.snapshot.catalog.tables["products"].rows
+                    if row["product_id"] == product_id
+                ),
+                None,
+            )
+            if product is None:
+                raise ValueError(f"Product {product_id} is not present in the current catalog.")
+            stock = product["stock_quantity"]
+            if (
+                str(product["status"]).casefold() != "active"
+                or not isinstance(stock, int)
+                or stock <= 0
+            ):
+                raise ValueError(f"{product['name']} is not currently available for purchase.")
+            if quantity > stock:
+                raise ValueError(f"The requested quantity of {product['name']} exceeds stock.")
+            lines.append((product, quantity))
+        return lines
+
+    def _promotion_rate(self, product: Row) -> Decimal:
+        rates = {
+            Decimal(str(row["discount_percent"]))
+            for row in self.snapshot.catalog.tables["promotions"].rows
+            if row["product_id"] == product["product_id"] and row["is_active"] == 1
+        }
+        if len(rates) > 1:
+            raise PolicyUnavailableError(
+                f"Multiple active discounts apply to {product['name']}. Staff must confirm the "
+                "offer."
+            )
+        return max(rates) if rates else Decimal(0)
+
     def calculate_quote(
-        self, product_id: int, quantity: int = 1, payment_method: str = "pix", installments: int = 1
+        self, items: list[dict[str, int]], payment_method: str = "pix", installments: int = 1
     ) -> dict[str, object]:
-        """Calculate a sourced payment quote using exact Decimal arithmetic.
+        """Calculate one sourced payment quote for the whole order with exact Decimal arithmetic.
 
         Parameters:
-            product_id: The product selected from the current catalog.
-            quantity: Positive quantity, limited by current stock.
+            items: Every product in the order as {"product_id": id, "quantity": n}. Quote all
+                products together in one call; never add separate quotes.
             payment_method: PIX, credit, debit or boleto, when supported by the policy.
-            installments: Requested number of installments.
+            installments: Requested number of installments for the order total.
 
         Returns:
-            Original/current totals, exact installment amounts and policy references, or an error.
+            Per-item prices, the order total, exact installments, shipping on the order total and
+            policy references, or an error.
         """
         try:
             tables = self.snapshot.catalog.tables
@@ -368,44 +418,50 @@ class StoreTools:
                 raise PolicyUnavailableError(
                     "Product and promotion sources are required for a quote."
                 )
-            product = next(
-                (row for row in tables["products"].rows if row["product_id"] == product_id), None
-            )
-            if product is None:
-                raise ValueError("The product is not present in the current catalog.")
-            stock = product["stock_quantity"]
-            if (
-                str(product["status"]).casefold() != "active"
-                or not isinstance(stock, int)
-                or stock <= 0
-            ):
-                raise ValueError("This product is not currently available for purchase.")
-            if type(quantity) is not int or not 1 <= quantity <= stock:
-                raise ValueError("The requested quantity exceeds available stock or is invalid.")
-            original = check_cents(check_cents(product["price_cents"]) * quantity)
-            rates = {
-                Decimal(str(row["discount_percent"]))
-                for row in tables["promotions"].rows
-                if row["product_id"] == product_id and row["is_active"] == 1
-            }
-            if len(rates) > 1:
-                raise PolicyUnavailableError(
-                    "Multiple active discounts apply to this product. Staff must confirm the offer."
+            lines: list[dict[str, object]] = []
+            original_total = regular = promoted = 0
+            for product, quantity in self._order_lines(items):
+                original = check_cents(check_cents(product["price_cents"]) * quantity)
+                rate = self._promotion_rate(product)
+                current = discounted_cents(original, str(rate))
+                original_total = check_cents(original_total + original)
+                if rate:
+                    promoted = check_cents(promoted + current)
+                else:
+                    regular = check_cents(regular + current)
+                lines.append(
+                    {
+                        "product": product["name"],
+                        "quantity": quantity,
+                        "original_total": format_brl(original),
+                        "current_catalog_total": format_brl(current),
+                        "active_promotion_percent": str(rate),
+                    }
                 )
-            promotional = bool(rates)
-            rate = max(rates) if rates else Decimal(0)
-            current = discounted_cents(original, str(rate))
+            catalog_total = check_cents(regular + promoted)
+            # The PIX discount never applies to promotional prices, so it covers only the
+            # regular-price subtotal; any other method is quoted on the whole order.
+            if payment_method.casefold().strip() == "pix":
+                parts = [part for part in ((regular, False), (promoted, True)) if part[0]]
+                parts = parts or [(0, False)]
+            else:
+                parts = [(catalog_total, bool(promoted))]
             with localcontext() as context:
                 context.prec = 120
-                quote = self.snapshot.rules.quote(
-                    Decimal(current) / 100,
-                    payment_method=payment_method,
-                    installments=installments,
-                    promotional=promotional,
-                )
-                total = check_cents(int(quote.total * 100))
+                quotes = [
+                    self.snapshot.rules.quote(
+                        Decimal(amount) / 100,
+                        payment_method=payment_method,
+                        installments=installments,
+                        promotional=flag,
+                    )
+                    for amount, flag in parts
+                ]
+                total = check_cents(sum(int(quote.total * 100) for quote in quotes))
             amounts = split_installments(total, installments)
-            references = _citations(quote.citations)
+            references = _citations(
+                tuple(dict.fromkeys(c for quote in quotes for c in quote.citations))
+            )
             self.sources.extend(references)
             self.sources.extend({"file": path} for path in tables["products"].source_paths)
             self.sources.extend({"file": path} for path in tables["promotions"].source_paths)
@@ -420,21 +476,21 @@ class StoreTools:
                     "metro_region_shipping": format_brl(fee),
                     "total_with_metro_shipping": format_brl(check_cents(total + fee)),
                     "shipping_note": "Campo Grande metropolitan region only, based on the final "
-                    "amount paid. Other cities depend on the destination CEP; staff quote it on "
-                    f"WhatsApp {self.evidence.whatsapp}.",
+                    "amount paid for the whole order. Other cities depend on the destination "
+                    f"CEP; staff quote it on WhatsApp {self.evidence.whatsapp}.",
                 }
+            notes = " ".join(dict.fromkeys(quote.note for quote in quotes if quote.note))
             return {
-                "product": product["name"],
-                "quantity": quantity,
-                "original_total": format_brl(original),
-                "current_catalog_total": format_brl(current),
-                "active_promotion_percent": str(rate),
+                "items": lines,
+                "order_original_total": format_brl(original_total),
+                "order_catalog_total": format_brl(catalog_total),
                 "payment_method": payment_method,
                 "total": format_brl(total),
                 "installment_amounts": [format_brl(value) for value in amounts],
                 "sources": references,
-                "policy_note": quote.note if installments == 1 else None,
-                "note": "Installment amounts sum exactly to the quoted total. This is not a purchase.",
+                "policy_note": notes or None if installments == 1 else None,
+                "note": "One quote for the whole order: discounts, installments and shipping use "
+                "the order total. Installment amounts sum exactly to it. This is not a purchase.",
                 **shipping,
             }
         except (ValueError, ArithmeticError) as error:

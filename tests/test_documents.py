@@ -264,7 +264,9 @@ def test_pdf_payment_denial_reaches_the_quote_tool_as_an_error(
     access = ConversationAccess(
         tmp_path / "sessions.sqlite3", conversation_token(), "denied-method"
     )
-    result = StoreTools(snapshot, access).calculate_quote(101, payment_method=method)
+    result = StoreTools(snapshot, access).calculate_quote(
+        [{"product_id": 101}], payment_method=method
+    )
     assert "error" in result
     assert "total" not in result
 

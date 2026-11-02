@@ -112,10 +112,13 @@ SCENARIOS = (
         "promocoes",
         "Promotions: inactive (Takamine GD20) vs active (Ohana CK-20, 20%) and PIX stacking.",
         "Inactive promotion not offered; active price shown with original price and "
-        "percentage; PIX 5% does not stack on a promotional price.",
+        "percentage; PIX 5% does not stack on a promotional price; a two-product order is "
+        "quoted in one call, with shipping on the order total.",
         (
             "O Takamine GD20 está em promoção? E o Ohana CK-20?",
             "Se eu pagar o Ohana no PIX, ganho mais 5% de desconto?",
+            "E se eu levar o Ohana CK-20 e o Shelby SN-100 juntos no PIX, entregando em Campo "
+            "Grande, quanto fica com o frete?",
         ),
     ),
     Scenario(

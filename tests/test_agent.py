@@ -117,7 +117,7 @@ def test_multiple_active_promotions_require_unambiguous_discount(
     tables["promotions"] = replace(promotions, rows=(*promotions.rows, other))
     snapshot = replace(snapshot, catalog=replace(snapshot.catalog, tables=tables))
     with _agent(_settings(tmp_path), snapshot, conversation_token(), []) as (_, tools, _):
-        result = tools.calculate_quote(101)
+        result = tools.calculate_quote([{"product_id": 101}])
     if second_rate == "20":
         assert "Staff must confirm" in str(result["error"])
         assert "total" not in result
@@ -277,7 +277,7 @@ def test_quote_uses_current_rules_and_exact_cent_allocation(
             tool_response(
                 "calculate_quote",
                 {
-                    "product_id": 101,
+                    "items": [{"product_id": 101, "quantity": 1}],
                     "payment_method": method,
                     "installments": count,
                 },
