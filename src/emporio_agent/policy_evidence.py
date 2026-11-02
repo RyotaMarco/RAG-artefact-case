@@ -31,9 +31,9 @@ RULE_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "defect": (
         ("4.2", "podem ser trocados em até 30 (trinta) dias corridos após a compra"),
+        ("4.2", "Após os 30 dias, o cliente deve acionar a garantia diretamente com o fabricante"),
         ("4.2", "pode intermediar o processo mediante solicitação"),
-        ("8.1", "garantia legal de 90 (noventa) dias contra defeitos de fabricação"),
-        ("8.1", "contados a partir da data de recebimento pelo cliente"),
+        ("8.2", "pode variar de 6 meses a 2 anos"),
     ),
     "metro_shipping": (
         ("5.1", "Frete grátis para pedidos acima de R$ 500,00"),
