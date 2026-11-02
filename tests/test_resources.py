@@ -8,9 +8,9 @@ from typing import cast
 
 import pytest
 from agent_fixtures import small_snapshot
+from test_embeddings import VoyageStub, make_embedder
 
 from emporio_agent.agent import ConversationAccess, conversation_token
-from emporio_agent.embeddings import EmbeddingConfig, HFEmbedder
 from emporio_agent.sql import QueryEngine
 
 
@@ -75,30 +75,6 @@ def _scalar(path: Path, sql: str) -> object:
         row = cast(tuple[object, ...] | None, connection.execute(sql).fetchone())
         assert row is not None
         return row[0]
-
-
-class ScriptedClient:
-    """Return valid or invalid vectors without contacting a hosted provider."""
-
-    def __init__(self) -> None:
-        """Start with valid vectors and no provider attempts."""
-        self.calls = 0
-        self.timeout = False
-        self.invalid_second = False
-
-    def feature_extraction(
-        self, text: str | list[str], *, model: str, normalize: bool, truncate: bool
-    ) -> object:
-        """Inject provider failure or a bad vector after one valid row in a batch."""
-        assert model and normalize and not truncate
-        self.calls += 1
-        if self.timeout:
-            raise TimeoutError("Fixture provider failed.")
-        batch = [text] if isinstance(text, str) else text
-        return [
-            [0.0, 0.0] if self.invalid_second and index == 1 else [3.0, 4.0]
-            for index, _ in enumerate(batch)
-        ]
 
 
 def test_conversation_connections_close_and_verification_commits(
@@ -173,50 +149,50 @@ def test_embedding_constructor_hits_and_misses_close_connections(
 ) -> None:
     """Cache writes survive closure and a cache hit requires no additional provider request."""
     path = tmp_path / "vectors.sqlite3"
-    client = ScriptedClient()
-    config = EmbeddingConfig(dimensions=2)
-    embedder = HFEmbedder(path, client=client, config=config)
-    _assert_closed(tracker)
-    assert embedder.embed_documents(["policy"]) == [(0.6, 0.8)]
-    _assert_closed(tracker)
-    client.timeout = True
-    restored = HFEmbedder(path, client=client, config=config)
-    assert restored.embed_documents(["policy"]) == [(0.6, 0.8)]
-    assert client.calls == 1
-    assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 1
-    _assert_closed(tracker)
+    stub = VoyageStub()
+    with stub.client:
+        embedder = make_embedder(path, stub)
+        _assert_closed(tracker)
+        assert embedder.embed_documents(["policy"]) == [(0.6, 0.8)]
+        _assert_closed(tracker)
+        stub.failure = "timeout"
+        restored = make_embedder(path, stub)
+        assert restored.embed_documents(["policy"]) == [(0.6, 0.8)]
+        assert len(stub.requests) == 1
+        assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 1
+        _assert_closed(tracker)
 
 
 def test_embedding_provider_failure_closes_the_read_connection(
     tmp_path: Path, tracker: ResourceTracker
 ) -> None:
     """An exception during a cache miss releases the active connection immediately."""
-    client = ScriptedClient()
-    embedder = HFEmbedder(
-        tmp_path / "vectors.sqlite3", client=client, config=EmbeddingConfig(dimensions=2)
-    )
-    client.timeout = True
-    with pytest.raises(TimeoutError, match="Fixture provider failed"):
-        embedder.embed_documents(["policy"])
+    stub = VoyageStub()
+    with stub.client:
+        embedder = make_embedder(tmp_path / "vectors.sqlite3", stub)
+        stub.failure = "timeout"
+        with pytest.raises(ValueError, match="timed out"):
+            embedder.embed_documents(["policy"])
     _assert_closed(tracker)
 
 
-def test_invalid_embedding_batch_rolls_back_prior_rows_and_closes(
+def test_invalid_embedding_batch_leaves_no_rows_and_closes(
     tmp_path: Path, tracker: ResourceTracker
 ) -> None:
-    """A later invalid vector cannot commit the valid first row or keep the database locked."""
+    """An invalid later vector cannot publish a valid first row or keep the database locked."""
     path = tmp_path / "vectors.sqlite3"
-    client = ScriptedClient()
-    client.invalid_second = True
-    embedder = HFEmbedder(path, client=client, config=EmbeddingConfig(dimensions=2))
-    with pytest.raises(ValueError, match="zero or invalid vector"):
-        embedder.embed_documents(["first policy", "second policy"])
-    _assert_closed(tracker)
-    assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 0
-    client.invalid_second = False
-    assert embedder.embed_documents(["first policy", "second policy"]) == [(0.6, 0.8)] * 2
-    assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 2
-    _assert_closed(tracker)
+    stub = VoyageStub()
+    with stub.client:
+        stub.invalid_second = True
+        embedder = make_embedder(path, stub)
+        with pytest.raises(ValueError, match="zero or invalid vector"):
+            embedder.embed_documents(["first policy", "second policy"])
+        _assert_closed(tracker)
+        assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 0
+        stub.invalid_second = False
+        assert embedder.embed_documents(["first policy", "second policy"]) == [(0.6, 0.8)] * 2
+        assert _scalar(path, "SELECT COUNT(*) FROM vectors") == 2
+        _assert_closed(tracker)
 
 
 def test_embedding_constructor_failure_closes_connection(
@@ -225,10 +201,8 @@ def test_embedding_constructor_failure_closes_connection(
     """A schema-creation failure does not leak the connection opened by the constructor."""
     tracker.denied_action = sqlite3.SQLITE_CREATE_TABLE
     tracker.denied_table = "vectors"
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        HFEmbedder(
-            tmp_path / "vectors.sqlite3",
-            client=ScriptedClient(),
-            config=EmbeddingConfig(dimensions=2),
-        )
+    stub = VoyageStub()
+    with stub.client:
+        with pytest.raises(sqlite3.DatabaseError, match="authorized"):
+            make_embedder(tmp_path / "vectors.sqlite3", stub)
     _assert_closed(tracker)

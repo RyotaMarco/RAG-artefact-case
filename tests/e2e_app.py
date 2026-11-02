@@ -101,7 +101,7 @@ def respond(body: JsonObject) -> JsonObject:
 @st.cache_resource(show_spinner=False)
 def runtime(settings: Settings) -> StoreRuntime:
     """Exercise real discovery and snapshots with deterministic embedding and tokenizer inputs."""
-    if not settings.hf_token:
+    if not settings.voyage_key:
         return StoreRuntime(settings)
     return StoreRuntime(settings, embedder=FixedEmbedder(), tokenizer=CharacterTokenizer())
 
@@ -111,6 +111,6 @@ settings = Settings(
     data_dir=Path(os.environ["EMPORIO_E2E_DATA_DIR"]),
     runtime_dir=Path(os.environ["EMPORIO_E2E_RUNTIME_DIR"]),
     anthropic_key="" if scenario == "missing-key" else "fixture-anthropic-key",
-    hf_token="" if scenario == "missing-hf" else "fixture-hf-key",
+    voyage_key="" if scenario == "missing-voyage" else "fixture-voyage-key",
 )
 render(settings, runtime_factory=runtime, transport_factory=lambda: ClaudeStub(respond).transport)

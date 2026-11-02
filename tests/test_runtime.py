@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import cast
 
+import httpx2
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
@@ -20,12 +21,14 @@ from emporio_agent.data import Catalog, DataError, write_catalog
 from emporio_agent.documents import ChunkConfig
 from emporio_agent.embeddings import (
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_TOKENIZER_MODEL,
     DEFAULT_TOKENIZER_REVISION,
     EmbeddingConfig,
-    HFEmbedder,
+    VoyageEmbedder,
 )
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.runtime import Snapshot, StoreRuntime, load_tokenizer
+from tests.test_embeddings import embedding_response
 
 
 class CountingTokenizer:
@@ -80,24 +83,33 @@ class RecordingEmbedder:
         return (1.0, 2.0)
 
 
-class RecordingClient:
-    """Stand in for the hosted provider while exercising the real SQLite vector cache."""
+class RecordingTransport:
+    """Serve native Voyage HTTP responses while exercising the real SQLite vector cache."""
 
     def __init__(self) -> None:
         """Record provider attempts independently of embedder process lifetime."""
         self.calls: list[list[str]] = []
+        self.requests: list[httpx2.Request] = []
+        self.payloads: list[dict[str, object]] = []
         self.fail = False
+        self.transport = httpx2.MockTransport(self.handle)
 
-    def feature_extraction(
-        self, text: str | list[str], *, model: str, normalize: bool, truncate: bool
-    ) -> object:
+    def handle(self, request: httpx2.Request) -> httpx2.Response:
         """Provide deterministic vectors and fail if a restart unexpectedly misses cache."""
-        assert model and normalize and not truncate
-        batch = [text] if isinstance(text, str) else text
+        assert request.method == "POST" and request.url.path == "/v1/embeddings"
+        decoded: object = json.loads(request.content)
+        assert isinstance(decoded, dict)
+        payload = cast(dict[str, object], decoded)
+        raw = payload["input"]
+        assert isinstance(raw, list)
+        assert all(isinstance(text, str) for text in cast(list[object], raw))
+        batch = cast(list[str], raw)
         self.calls.append(batch)
+        self.requests.append(request)
+        self.payloads.append(payload)
         if self.fail:
             raise AssertionError("A persisted vector must not trigger another provider call.")
-        return [[3.0, 4.0] for _ in batch]
+        return httpx2.Response(200, json=embedding_response(payload))
 
 
 def _settings(directory: Path) -> Settings:
@@ -190,18 +202,18 @@ def _citations(snapshot: Snapshot) -> set[str]:
 @pytest.mark.parametrize(
     "embedding_model, tokenizer_model, revision, expected_model, expected_revision",
     [
-        (DEFAULT_EMBEDDING_MODEL, None, None, DEFAULT_EMBEDDING_MODEL, DEFAULT_TOKENIZER_REVISION),
-        ("example/encoder", None, None, "example/encoder", "main"),
+        (DEFAULT_EMBEDDING_MODEL, None, None, DEFAULT_TOKENIZER_MODEL, DEFAULT_TOKENIZER_REVISION),
+        ("voyage-fixture", None, None, "voyageai/voyage-fixture", "main"),
         (DEFAULT_EMBEDDING_MODEL, "example/tokenizer", None, "example/tokenizer", "main"),
         (
-            "example/encoder",
-            DEFAULT_EMBEDDING_MODEL,
+            "voyage-fixture",
+            DEFAULT_TOKENIZER_MODEL,
             None,
-            DEFAULT_EMBEDDING_MODEL,
+            DEFAULT_TOKENIZER_MODEL,
             DEFAULT_TOKENIZER_REVISION,
         ),
         (
-            "example/encoder",
+            "voyage-fixture",
             "example/tokenizer",
             "fixture-revision",
             "example/tokenizer",
@@ -218,7 +230,7 @@ def test_tokenizer_download_follows_effective_repository_and_revision(
     expected_model: str,
     expected_revision: str,
 ) -> None:
-    """Pin the default Qwen tokenizer without applying its commit to an unrelated model."""
+    """Pin only the matching Voyage tokenizer and never disclose its API key to Hugging Face."""
     local_tokenizer = tmp_path / "tokenizer.json"
     Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")).save(str(local_tokenizer))
     calls: list[dict[str, object]] = []
@@ -230,7 +242,7 @@ def test_tokenizer_download_follows_effective_repository_and_revision(
     monkeypatch.setattr("emporio_agent.runtime.hf_hub_download", download)
     settings = replace(
         _settings(tmp_path),
-        hf_token="hf_fixture",
+        voyage_key="voyage_fixture",
         embedding=EmbeddingConfig(model=embedding_model),
         tokenizer_model=tokenizer_model,
         tokenizer_revision=revision,
@@ -242,7 +254,7 @@ def test_tokenizer_download_follows_effective_repository_and_revision(
             "filename": "tokenizer.json",
             "revision": expected_revision,
             "cache_dir": str(settings.runtime_dir / "tokenizer"),
-            "token": "hf_fixture",
+            "token": False,
         }
     ]
 
@@ -250,38 +262,78 @@ def test_tokenizer_download_follows_effective_repository_and_revision(
 def test_runtime_embedding_settings_reach_client_and_invalidate_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Changing model conventions rebuilds policy vectors with the configured hosted client."""
+    """Forward the configured endpoint, credentials and roles without reusing an old vector space."""
     settings = _settings(tmp_path)
     _categories(settings.data_dir)
     _payments(settings.data_dir / "payments.pdf")
     settings = replace(
         settings,
-        hf_token="hf_fixture",
+        voyage_key="voyage_fixture",
         embedding_timeout_seconds=12,
+        embedding_requests_per_minute=2,
+        embedding_tokens_per_minute=100_000,
         embedding=EmbeddingConfig(
-            model="example/encoder",
-            provider="example-provider",
-            dimensions=2,
-            query_prefix="query:",
-            document_prefix="passage:",
+            model="voyage-fixture",
+            base_url="https://embedding.example.test/v1",
         ),
     )
-    client = RecordingClient()
+    fixture = RecordingTransport()
     arguments: list[dict[str, object]] = []
+    clients: list[httpx2.Client] = []
+    native_client = httpx2.Client
 
-    def make_client(**kwargs: object) -> RecordingClient:
-        arguments.append(kwargs)
+    def make_client(
+        *, headers: dict[str, str], timeout: float, follow_redirects: bool
+    ) -> httpx2.Client:
+        arguments.append(
+            {"headers": headers, "timeout": timeout, "follow_redirects": follow_redirects}
+        )
+        client = native_client(
+            transport=fixture.transport,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
+        clients.append(client)
         return client
 
-    monkeypatch.setattr("emporio_agent.runtime.InferenceClient", make_client)
-    first = StoreRuntime(settings, tokenizer=CountingTokenizer()).refresh()
-    assert arguments == [{"provider": "example-provider", "token": "hf_fixture", "timeout": 12}]
-    assert client.calls[0][0].startswith("passage: ")
-    updated = replace(settings, embedding=replace(settings.embedding, document_prefix="document:"))
-    second = StoreRuntime(updated, tokenizer=CountingTokenizer()).refresh()
-    assert first.generation_id != second.generation_id
-    assert len(client.calls) == 2
-    assert client.calls[-1][0].startswith("document: ")
+    monkeypatch.setattr("emporio_agent.runtime.httpx2.Client", make_client)
+    try:
+        first = StoreRuntime(settings, tokenizer=CountingTokenizer()).refresh()
+        assert arguments == [
+            {
+                "headers": {"Authorization": "Bearer voyage_fixture"},
+                "timeout": 12,
+                "follow_redirects": False,
+            }
+        ]
+        assert str(fixture.requests[0].url) == "https://embedding.example.test/v1/embeddings"
+        assert fixture.payloads[0]["model"] == "voyage-fixture"
+        assert fixture.payloads[0]["input_type"] == "document"
+        assert fixture.payloads[0]["truncation"] is False
+        assert first.policies is not None
+        assert first.policies.search("PIX discount")
+        assert fixture.payloads[1]["input_type"] == "query"
+        with pytest.raises(ValueError, match="rate limit"):
+            first.policies.search("Another uncached policy question")
+        assert len(fixture.calls) == 2
+        updated = replace(
+            settings,
+            embedding=replace(
+                settings.embedding,
+                model="voyage-fixture-v2",
+                base_url="https://new-embedding.example.test/v1",
+            ),
+        )
+        second = StoreRuntime(updated, tokenizer=CountingTokenizer()).refresh()
+        assert first.generation_id != second.generation_id
+        assert len(fixture.calls) == 3
+        assert str(fixture.requests[-1].url) == "https://new-embedding.example.test/v1/embeddings"
+        assert fixture.payloads[-1]["model"] == "voyage-fixture-v2"
+        assert fixture.payloads[-1]["input_type"] == "document"
+    finally:
+        for client in clients:
+            client.close()
 
 
 def test_chunk_settings_rebuild_metadata_and_reuse_vectors_for_unchanged_passages(
@@ -291,24 +343,27 @@ def test_chunk_settings_rebuild_metadata_and_reuse_vectors_for_unchanged_passage
     settings = _settings(tmp_path)
     _categories(settings.data_dir)
     _payments(settings.data_dir / "payments.pdf")
-    client = RecordingClient()
-    embedder = HFEmbedder(
-        settings.runtime_dir / "vectors.sqlite3",
-        client=client,
-        config=EmbeddingConfig(dimensions=2),
-    )
-    tokenizer = CountingTokenizer()
-    first = StoreRuntime(settings, embedder=embedder, tokenizer=tokenizer).refresh()
-    original_calls = tokenizer.calls
-    updated = replace(
-        settings, chunking=ChunkConfig(target_tokens=500, max_tokens=750, overlap_tokens=60)
-    )
-    second = StoreRuntime(updated, embedder=embedder, tokenizer=tokenizer).refresh()
-    assert second.generation_id != first.generation_id
-    assert tokenizer.calls > original_calls
-    assert first.policies is not None and second.policies is not None
-    assert second.policies.chunks == first.policies.chunks
-    assert len(client.calls) == 1
+    fixture = RecordingTransport()
+    with httpx2.Client(transport=fixture.transport) as client:
+        embedder = VoyageEmbedder(
+            settings.runtime_dir / "vectors.sqlite3",
+            client=client,
+            tokenizer=CountingTokenizer(),
+            requests_per_minute=100,
+            tokens_per_minute=100_000,
+        )
+        tokenizer = CountingTokenizer()
+        first = StoreRuntime(settings, embedder=embedder, tokenizer=tokenizer).refresh()
+        original_calls = tokenizer.calls
+        updated = replace(
+            settings, chunking=ChunkConfig(target_tokens=500, max_tokens=750, overlap_tokens=60)
+        )
+        second = StoreRuntime(updated, embedder=embedder, tokenizer=tokenizer).refresh()
+        assert second.generation_id != first.generation_id
+        assert tokenizer.calls > original_calls
+        assert first.policies is not None and second.policies is not None
+        assert second.policies.chunks == first.policies.chunks
+        assert len(fixture.calls) == 1
 
 
 def test_unchanged_refresh_reuses_generation_and_does_not_embed_csv(tmp_path: Path) -> None:
@@ -581,22 +636,36 @@ def test_restart_reuses_metadata_and_persisted_vectors_without_provider_calls(
     _categories(settings.data_dir)
     _payments(settings.data_dir / "payments.pdf")
     cache = settings.runtime_dir / "vectors.sqlite3"
-    client = RecordingClient()
-    config = EmbeddingConfig(dimensions=2)
-    embedder = HFEmbedder(cache, client=client, config=config)
-    first = StoreRuntime(settings, embedder=embedder, tokenizer=CountingTokenizer()).refresh()
-    assert len(client.calls) == 1
-    client.fail = True
-    tokenizer = CountingTokenizer()
-    tokenizer.fail = True
-    restored = StoreRuntime(
-        settings, embedder=HFEmbedder(cache, client=client, config=config), tokenizer=tokenizer
-    ).refresh()
-    assert restored.generation_id == first.generation_id
-    assert tokenizer.calls == 0
-    assert len(client.calls) == 1
-    assert restored.rules.pix_rate == Decimal("0.05")
-    assert _scalar(_database(settings), "SELECT COUNT(*) FROM categories") == 1
+    fixture = RecordingTransport()
+    with httpx2.Client(transport=fixture.transport) as client:
+        embedder = VoyageEmbedder(
+            cache,
+            client=client,
+            tokenizer=CountingTokenizer(),
+            requests_per_minute=100,
+            tokens_per_minute=100_000,
+        )
+        first = StoreRuntime(settings, embedder=embedder, tokenizer=CountingTokenizer()).refresh()
+        assert len(fixture.calls) == 1
+        fixture.fail = True
+        tokenizer = CountingTokenizer()
+        tokenizer.fail = True
+        restored = StoreRuntime(
+            settings,
+            embedder=VoyageEmbedder(
+                cache,
+                client=client,
+                tokenizer=CountingTokenizer(),
+                requests_per_minute=100,
+                tokens_per_minute=100_000,
+            ),
+            tokenizer=tokenizer,
+        ).refresh()
+        assert restored.generation_id == first.generation_id
+        assert tokenizer.calls == 0
+        assert len(fixture.calls) == 1
+        assert restored.rules.pix_rate == Decimal("0.05")
+        assert _scalar(_database(settings), "SELECT COUNT(*) FROM categories") == 1
 
 
 @pytest.mark.parametrize("empty_chunks", [False, True])
