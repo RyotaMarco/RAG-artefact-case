@@ -25,6 +25,7 @@ from emporio_agent.money import check_cents, discounted_cents, format_brl, split
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine, QueryError
+from emporio_agent.store_facts import TOPICS, StoreFacts
 
 INSTRUCTIONS = """
 You are the customer support assistant for the musical instrument store described in the sources.
@@ -160,6 +161,7 @@ class StoreTools:
         self.snapshot = snapshot
         self.access = access
         self.engine = QueryEngine(snapshot.catalog)
+        self.facts = StoreFacts(snapshot.policies.sections if snapshot.policies else ())
         self.sources: list[dict[str, object]] = []
         self.query_failures = 0
 
@@ -184,6 +186,26 @@ class StoreTools:
             return {"passages": passages, "generation": self.snapshot.generation_id}
         except ValueError as error:
             return {"error": f"Policy retrieval is unavailable: {error}"}
+
+    def store_facts(self, topic: str) -> dict[str, object]:
+        """Read owner-approved store facts confirmed verbatim by the active manual.
+
+        Parameters:
+            topic: contact, hours, payments, returns, warranty, shipping, assortment or complaints.
+
+        Returns:
+            Statements to rely on, owner clarifications and manual sources, or an error.
+        """
+        if topic not in TOPICS:
+            return {"error": f"Unknown topic. Use one of: {', '.join(TOPICS)}."}
+        facts = self.facts.topic(topic)
+        if not facts:
+            return {
+                "error": "The active manual does not confirm these facts. Use search_policies, "
+                "say the information could not be confirmed and refer the customer to staff."
+            }
+        self.sources.extend(_citations(self.facts.citations(*self.facts.keys(topic))))
+        return {"facts": facts}
 
     def verify_order(self, order_id: int, email: str) -> dict[str, object]:
         """Verify one order/contact pair before private order queries.
@@ -345,7 +367,13 @@ def build_agent(
         user_id=access.identity,
         session_id=token,
         add_history_to_context=False,
-        tools=[tools.search_policies, tools.verify_order, tools.query_data, tools.calculate_quote],
+        tools=[
+            tools.store_facts,
+            tools.search_policies,
+            tools.verify_order,
+            tools.query_data,
+            tools.calculate_quote,
+        ],
         instructions=INSTRUCTIONS,
         tool_call_limit=settings.max_tool_calls,
         markdown=True,
