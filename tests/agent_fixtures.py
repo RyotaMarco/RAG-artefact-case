@@ -30,7 +30,7 @@ def _message(content: list[JsonObject], stop_reason: str) -> JsonObject:
         "id": "msg_fixture",
         "type": "message",
         "role": "assistant",
-        "model": "claude-sonnet-5-5",
+        "model": "claude-haiku-5-5",
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": None,
@@ -71,7 +71,7 @@ def tool_response(
         content.append(
             {
                 "type": "thinking",
-                "thinking": "A lookup is needed.",
+                "thinking": "",
                 "signature": "fixture-signature",
             }
         )
