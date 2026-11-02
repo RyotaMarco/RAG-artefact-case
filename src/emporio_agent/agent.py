@@ -30,7 +30,7 @@ from emporio_agent.money import (
     parse_customer_amount,
     split_installments,
 )
-from emporio_agent.policies import PolicyUnavailableError
+from emporio_agent.policies import PolicyUnavailableError, normalize_method
 from emporio_agent.policy_evidence import (
     RETURN_REASONS,
     SPLIT_METHODS,
@@ -478,7 +478,7 @@ class StoreTools:
             catalog_total = check_cents(regular + promoted)
             # The PIX discount never applies to promotional prices, so it covers only the
             # regular-price subtotal; any other method is quoted on the whole order.
-            if payment_method.casefold().strip() == "pix":
+            if normalize_method(payment_method) == "pix":
                 parts = [part for part in ((regular, False), (promoted, True)) if part[0]]
                 parts = parts or [(0, False)]
             else:
@@ -582,11 +582,7 @@ class StoreTools:
                 raise PolicyUnavailableError(
                     "The active manual does not confirm combined payments. Refer to staff."
                 )
-            aliases = {"credit_card": "credit", "debit_card": "debit"}
-            methods = [
-                aliases.get(name.casefold().strip(), name.casefold().strip())
-                for name in (first_method, second_method)
-            ]
+            methods = [normalize_method(name) for name in (first_method, second_method)]
             if not set(methods) <= set(SPLIT_METHODS) or methods[0] == methods[1]:
                 raise ValueError(
                     "Combine two different methods among PIX, credit and debit. Boleto takes up "
