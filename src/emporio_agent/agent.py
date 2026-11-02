@@ -23,10 +23,17 @@ from emporio_agent.complaints import record_complaint
 from emporio_agent.config import Settings
 from emporio_agent.data import Row
 from emporio_agent.documents import Citation
-from emporio_agent.money import check_cents, discounted_cents, format_brl, split_installments
+from emporio_agent.money import (
+    check_cents,
+    discounted_cents,
+    format_brl,
+    parse_money_cents,
+    split_installments,
+)
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.policy_evidence import (
     RETURN_REASONS,
+    SPLIT_METHODS,
     PolicyEvidence,
     metro_shipping_cents,
     opening_status,
@@ -55,8 +62,9 @@ Use query_data for operational facts: price, stock, product status, promotions a
 Use search_policies for store identity, address, contacts, payment, warranty, shipping and return
 rules. For support contact, give the WhatsApp channel from the manual's WhatsApp section and the
 email the passages show. [contato interno omitido] marks internal data: never guess, reconstruct
-or mention it. Combined payment methods: state the manual's threshold and let staff set the split
-on WhatsApp; never calculate the parts.
+or mention it. For two payment methods, ask how much the customer wants to pay with the first one if they did not
+say, then call calculate_split_payment; there is no PIX discount in combined payments, boleto is
+never combined, and the values must be confirmed when finalizing the purchase.
 Formulate policy search terms in Portuguese when useful for lexical search of Portuguese sources.
 Use both tools when a question combines an order/product and a policy. Cite the supplied file,
 section/page or CSV source briefly. If the evidence is missing or conflicts, say so and ask for
@@ -397,6 +405,54 @@ class StoreTools:
             )
         return max(rates) if rates else Decimal(0)
 
+    def _order_totals(
+        self, items: list[dict[str, int]]
+    ) -> tuple[list[dict[str, object]], int, int, int]:
+        """Return line details, the original total and regular/promotional subtotals in cents."""
+        tables = self.snapshot.catalog.tables
+        if "products" not in tables or "promotions" not in tables:
+            raise PolicyUnavailableError("Product and promotion sources are required for a quote.")
+        lines: list[dict[str, object]] = []
+        original_total = regular = promoted = 0
+        for product, quantity in self._order_lines(items):
+            original = check_cents(check_cents(product["price_cents"]) * quantity)
+            rate = self._promotion_rate(product)
+            current = discounted_cents(original, str(rate))
+            original_total = check_cents(original_total + original)
+            if rate:
+                promoted = check_cents(promoted + current)
+            else:
+                regular = check_cents(regular + current)
+            lines.append(
+                {
+                    "product": product["name"],
+                    "quantity": quantity,
+                    "original_total": format_brl(original),
+                    "current_catalog_total": format_brl(current),
+                    "active_promotion_percent": str(rate),
+                }
+            )
+        self.sources.extend({"file": path} for path in tables["products"].source_paths)
+        self.sources.extend({"file": path} for path in tables["promotions"].source_paths)
+        return lines, original_total, regular, promoted
+
+    def _metro_shipping(self, total: int) -> dict[str, object]:
+        """Report the metropolitan fee on the final amount paid, when the manual confirms it."""
+        if not self.evidence.has("metro_shipping"):
+            return {
+                "shipping_note": "Shipping rules are not confirmed by the active manual. Staff "
+                "quote shipping."
+            }
+        fee = metro_shipping_cents(total)
+        self.sources.extend(_citations(self.evidence.citations("metro_shipping")))
+        return {
+            "metro_region_shipping": format_brl(fee),
+            "total_with_metro_shipping": format_brl(check_cents(total + fee)),
+            "shipping_note": "Campo Grande metropolitan region only, based on the final amount "
+            "paid for the whole order. Other cities depend on the destination CEP; staff quote "
+            f"it on WhatsApp {self.evidence.whatsapp}.",
+        }
+
     def calculate_quote(
         self, items: list[dict[str, int]], payment_method: str = "pix", installments: int = 1
     ) -> dict[str, object]:
@@ -413,31 +469,7 @@ class StoreTools:
             policy references, or an error.
         """
         try:
-            tables = self.snapshot.catalog.tables
-            if "products" not in tables or "promotions" not in tables:
-                raise PolicyUnavailableError(
-                    "Product and promotion sources are required for a quote."
-                )
-            lines: list[dict[str, object]] = []
-            original_total = regular = promoted = 0
-            for product, quantity in self._order_lines(items):
-                original = check_cents(check_cents(product["price_cents"]) * quantity)
-                rate = self._promotion_rate(product)
-                current = discounted_cents(original, str(rate))
-                original_total = check_cents(original_total + original)
-                if rate:
-                    promoted = check_cents(promoted + current)
-                else:
-                    regular = check_cents(regular + current)
-                lines.append(
-                    {
-                        "product": product["name"],
-                        "quantity": quantity,
-                        "original_total": format_brl(original),
-                        "current_catalog_total": format_brl(current),
-                        "active_promotion_percent": str(rate),
-                    }
-                )
+            lines, original_total, regular, promoted = self._order_totals(items)
             catalog_total = check_cents(regular + promoted)
             # The PIX discount never applies to promotional prices, so it covers only the
             # regular-price subtotal; any other method is quoted on the whole order.
@@ -463,22 +495,7 @@ class StoreTools:
                 tuple(dict.fromkeys(c for quote in quotes for c in quote.citations))
             )
             self.sources.extend(references)
-            self.sources.extend({"file": path} for path in tables["products"].source_paths)
-            self.sources.extend({"file": path} for path in tables["promotions"].source_paths)
-            shipping: dict[str, object] = {
-                "shipping_note": "Shipping rules are not confirmed by the active manual. Staff "
-                "quote shipping."
-            }
-            if self.evidence.has("metro_shipping"):
-                fee = metro_shipping_cents(total)
-                self.sources.extend(_citations(self.evidence.citations("metro_shipping")))
-                shipping = {
-                    "metro_region_shipping": format_brl(fee),
-                    "total_with_metro_shipping": format_brl(check_cents(total + fee)),
-                    "shipping_note": "Campo Grande metropolitan region only, based on the final "
-                    "amount paid for the whole order. Other cities depend on the destination "
-                    f"CEP; staff quote it on WhatsApp {self.evidence.whatsapp}.",
-                }
+            shipping = self._metro_shipping(total)
             notes = " ".join(dict.fromkeys(quote.note for quote in quotes if quote.note))
             return {
                 "items": lines,
@@ -492,6 +509,103 @@ class StoreTools:
                 "note": "One quote for the whole order: discounts, installments and shipping use "
                 "the order total. Installment amounts sum exactly to it. This is not a purchase.",
                 **shipping,
+            }
+        except (ValueError, ArithmeticError) as error:
+            return {"error": str(error)}
+
+    def calculate_split_payment(
+        self,
+        items: list[dict[str, int]],
+        first_method: str,
+        first_amount: str,
+        second_method: str,
+        first_installments: int = 1,
+        second_installments: int = 1,
+    ) -> dict[str, object]:
+        """Split the whole order between two payment methods, as the customer chose.
+
+        Parameters:
+            items: Every product in the order as {"product_id": id, "quantity": n}.
+            first_method: pix, credit or debit.
+            first_amount: Amount the customer stated for the first method, like "1000.00".
+            second_method: A different method among pix, credit and debit; it pays the rest.
+            first_installments: Credit installments for the first part, otherwise 1.
+            second_installments: Credit installments for the second part, otherwise 1.
+
+        Returns:
+            Each part with exact installments, the order total and shipping, or an error.
+        """
+        try:
+            rules = self.snapshot.rules
+            if rules.conflicts:
+                raise PolicyUnavailableError(
+                    "Conflicting source policies require staff confirmation."
+                )
+            if rules.mixed_payment_minimum is None or not self.evidence.has("mixed_payment"):
+                raise PolicyUnavailableError(
+                    "The active manual does not confirm combined payments. Refer to staff."
+                )
+            aliases = {"credit_card": "credit", "debit_card": "debit"}
+            methods = [
+                aliases.get(name.casefold().strip(), name.casefold().strip())
+                for name in (first_method, second_method)
+            ]
+            if not set(methods) <= set(SPLIT_METHODS) or methods[0] == methods[1]:
+                raise ValueError(
+                    "Combine two different methods among PIX, credit and debit. Boleto takes up "
+                    "to 3 business days to clear and is not combined."
+                )
+            lines, original_total, regular, promoted = self._order_totals(items)
+            total = check_cents(regular + promoted)
+            minimum = check_cents(int(rules.mixed_payment_minimum * 100))
+            if total <= minimum:
+                raise PolicyUnavailableError(
+                    f"Combined payment requires an order above {format_brl(minimum)}; this "
+                    f"order totals {format_brl(total)}."
+                )
+            first = parse_money_cents(first_amount)
+            if not 0 < first < total:
+                raise ValueError(
+                    f"The first amount must be above zero and below {format_brl(total)}."
+                )
+            payments: list[dict[str, object]] = []
+            citations: list[Citation] = list(rules.citations)
+            for method, amount, count in (
+                (methods[0], first, first_installments),
+                (methods[1], total - first, second_installments),
+            ):
+                if method == "credit":
+                    with localcontext() as context:
+                        context.prec = 120
+                        quote = rules.quote(
+                            Decimal(amount) / 100, payment_method="credit", installments=count
+                        )
+                    citations.extend(quote.citations)
+                elif count != 1:
+                    raise ValueError(f"The {method} part is paid in a single payment.")
+                payments.append(
+                    {
+                        "method": method,
+                        "amount": format_brl(amount),
+                        "installments": count,
+                        "installment_amounts": [
+                            format_brl(value) for value in split_installments(amount, count)
+                        ],
+                    }
+                )
+            references = _citations(
+                tuple(dict.fromkeys((*citations, *self.evidence.citations("mixed_payment"))))
+            )
+            self.sources.extend(references)
+            return {
+                "items": lines,
+                "order_original_total": format_brl(original_total),
+                "total": format_brl(total),
+                "payments": payments,
+                "sources": references,
+                "note": "Combined payments use catalog prices without the PIX discount. These "
+                "values must be confirmed when finalizing the purchase. This is not a purchase.",
+                **self._metro_shipping(total),
             }
         except (ValueError, ArithmeticError) as error:
             return {"error": str(error)}
@@ -552,6 +666,7 @@ def build_agent(
             tools.register_complaint,
             tools.query_data,
             tools.calculate_quote,
+            tools.calculate_split_payment,
         ],
         instructions=INSTRUCTIONS,
         tool_call_limit=settings.max_tool_calls,

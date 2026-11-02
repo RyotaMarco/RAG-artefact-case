@@ -63,10 +63,12 @@ SCENARIOS = (
         "takamine-parcelamento",
         "Price and installments for the Takamine GD20 (product 95, R$ 2.199,00).",
         "Price from the catalog, credit options from calculate_quote with exact R$ amounts; "
-        "the inactive 12% promotion is not applied.",
+        "the inactive 12% promotion is not applied; the PIX + credit split uses "
+        "calculate_split_payment without PIX discount and must be confirmed at checkout.",
         (
             "Quanto custa o Takamine GD20? Dá para parcelar?",
             "E em 12x no cartão, quanto fica cada parcela?",
+            "Posso pagar R$ 1.000 no PIX e o resto em 10x no cartão?",
         ),
     ),
     Scenario(
