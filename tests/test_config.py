@@ -56,7 +56,7 @@ def test_configuration_diagnostics_do_not_expose_credentials(tmp_path: Path) -> 
 def test_default_deployment_profile_is_explicit() -> None:
     """Preserve the approved providers, model format and initial execution settings."""
     settings = Settings.from_env()
-    assert settings.model == "claude-sonnet-5-5"
+    assert settings.model == "claude-haiku-5-5"
     assert settings.embedding.model == DEFAULT_EMBEDDING_MODEL
     assert settings.embedding.provider == "deepinfra"
     assert settings.embedding.dimensions == 1024
@@ -70,7 +70,7 @@ def test_default_deployment_profile_is_explicit() -> None:
     assert settings.store_timezone == "America/Campo_Grande"
     assert settings.claude_timeout_seconds == 60
     assert settings.embedding_timeout_seconds == 30
-    assert settings.max_output_tokens == 1024
+    assert settings.max_output_tokens == 2048
     assert settings.max_tool_calls == 6
 
 

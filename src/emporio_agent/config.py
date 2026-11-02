@@ -92,7 +92,7 @@ class Settings:
     runtime_dir: Path
     anthropic_key: str = field(default="", repr=False)
     hf_token: str = field(default="", repr=False)
-    model: str = "claude-sonnet-5-5"
+    model: str = "claude-haiku-5-5"
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     chunking: ChunkConfig = field(default_factory=ChunkConfig)
     tokenizer_model: str | None = None
@@ -100,7 +100,7 @@ class Settings:
     store_timezone: str = "America/Campo_Grande"
     claude_timeout_seconds: float = 60
     embedding_timeout_seconds: float = 30
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 2048
     max_tool_calls: int = 6
 
     @classmethod

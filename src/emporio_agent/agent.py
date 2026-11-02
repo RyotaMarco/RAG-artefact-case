@@ -331,7 +331,7 @@ def build_agent(
         api_key=settings.anthropic_key,
         client=Anthropic(api_key=settings.anthropic_key, http_client=http_client, max_retries=1),
         max_tokens=settings.max_output_tokens,
-        thinking={"type": "between_tools"},
+        thinking={"type": "adaptive"},
         output_config={"effort": "low"},
         cache_system_prompt=True,
         cache_tools=True,
