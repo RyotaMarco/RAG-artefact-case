@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from emporio_agent.config import Settings
-from emporio_agent.embeddings import DEFAULT_EMBEDDING_MODEL, DEFAULT_QUERY_PREFIX
+from emporio_agent.embeddings import DEFAULT_EMBEDDING_MODEL
 
 
 @pytest.fixture(autouse=True)
@@ -13,15 +13,16 @@ def clean_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep deployment tests independent of the developer's real credentials and profile."""
     for name in (
         "ANTHROPIC_API_KEY",
-        "HF_TOKEN",
+        "VOYAGE_API_KEY",
         "CLAUDE_MODEL",
         "DATA_DIR",
         "RUNTIME_DIR",
         "EMBEDDING_MODEL",
-        "EMBEDDING_PROVIDER",
+        "EMBEDDING_BASE_URL",
         "EMBEDDING_DIMENSIONS",
-        "EMBEDDING_QUERY_PREFIX",
-        "EMBEDDING_DOCUMENT_PREFIX",
+        "EMBEDDING_REQUESTS_PER_MINUTE",
+        "EMBEDDING_TOKENS_PER_MINUTE",
+        "EMBEDDING_BATCH_TOKENS",
         "EMBEDDING_TOKENIZER_MODEL",
         "EMBEDDING_TOKENIZER_REVISION",
         "STORE_TIMEZONE",
@@ -49,19 +50,17 @@ def test_generated_files_never_enter_source_inventory(
 
 def test_configuration_diagnostics_do_not_expose_credentials(tmp_path: Path) -> None:
     """Secrets never appear when a settings object is printed for troubleshooting."""
-    settings = Settings(tmp_path / "data", tmp_path / "runtime", "secret-claude", "secret-hf")
+    settings = Settings(tmp_path / "data", tmp_path / "runtime", "secret-claude", "secret-voyage")
     assert "secret-" not in repr(settings)
 
 
 def test_default_deployment_profile_is_explicit() -> None:
-    """Preserve the approved providers, model format and initial execution settings."""
+    """Preserve the approved model, endpoint and initial execution settings."""
     settings = Settings.from_env()
     assert settings.model == "claude-haiku-5-5"
     assert settings.embedding.model == DEFAULT_EMBEDDING_MODEL
-    assert settings.embedding.provider == "deepinfra"
+    assert settings.embedding.base_url == "https://ai.mongodb.com/v1"
     assert settings.embedding.dimensions == 1024
-    assert settings.embedding.query_prefix == DEFAULT_QUERY_PREFIX
-    assert settings.embedding.document_prefix == ""
     assert settings.chunking.target_tokens == 600
     assert settings.chunking.max_tokens == 800
     assert settings.chunking.overlap_tokens == 80
@@ -70,6 +69,9 @@ def test_default_deployment_profile_is_explicit() -> None:
     assert settings.store_timezone == "America/Campo_Grande"
     assert settings.claude_timeout_seconds == 60
     assert settings.embedding_timeout_seconds == 30
+    assert settings.embedding_requests_per_minute == 3
+    assert settings.embedding_tokens_per_minute == 10000
+    assert settings.embedding_batch_tokens == 8000
     assert settings.max_output_tokens == 2048
     assert settings.max_tool_calls == 6
 
@@ -77,18 +79,19 @@ def test_default_deployment_profile_is_explicit() -> None:
 def test_custom_deployment_profile_reads_all_environment_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Expose model/profile settings without losing prefixes or leaking API credentials."""
+    """Expose endpoint, rate and model settings without leaking API credentials."""
     overrides = {
         "ANTHROPIC_API_KEY": "secret-claude",
-        "HF_TOKEN": "secret-hf",
+        "VOYAGE_API_KEY": "secret-voyage",
         "CLAUDE_MODEL": "claude-custom-model",
         "DATA_DIR": str(tmp_path / "custom-inputs"),
         "RUNTIME_DIR": str(tmp_path / "custom-runtime"),
-        "EMBEDDING_MODEL": "organization/custom-model",
-        "EMBEDDING_PROVIDER": "hf-inference",
+        "EMBEDDING_MODEL": "custom-voyage-model",
+        "EMBEDDING_BASE_URL": "https://embeddings.example.test:8443/v1/",
         "EMBEDDING_DIMENSIONS": "384",
-        "EMBEDDING_QUERY_PREFIX": r"query:\nText:",
-        "EMBEDDING_DOCUMENT_PREFIX": r"passage:\nText:",
+        "EMBEDDING_REQUESTS_PER_MINUTE": "7",
+        "EMBEDDING_TOKENS_PER_MINUTE": "12000",
+        "EMBEDDING_BATCH_TOKENS": "6000",
         "EMBEDDING_TOKENIZER_MODEL": "organization/custom-tokenizer",
         "EMBEDDING_TOKENIZER_REVISION": "revision-42",
         "STORE_TIMEZONE": "UTC",
@@ -106,11 +109,9 @@ def test_custom_deployment_profile_reads_all_environment_values(
     assert settings.data_dir == (tmp_path / "custom-inputs").resolve()
     assert settings.runtime_dir == (tmp_path / "custom-runtime").resolve()
     assert settings.model == "claude-custom-model"
-    assert settings.embedding.model == "organization/custom-model"
-    assert settings.embedding.provider == "hf-inference"
+    assert settings.embedding.model == "custom-voyage-model"
+    assert settings.embedding.base_url == "https://embeddings.example.test:8443/v1"
     assert settings.embedding.dimensions == 384
-    assert settings.embedding.query_prefix == "query:\nText:"
-    assert settings.embedding.document_prefix == "passage:\nText:"
     assert settings.chunking.target_tokens == 256
     assert settings.chunking.max_tokens == 384
     assert settings.chunking.overlap_tokens == 0
@@ -119,30 +120,29 @@ def test_custom_deployment_profile_reads_all_environment_values(
     assert settings.store_timezone == "UTC"
     assert settings.claude_timeout_seconds == 12.5
     assert settings.embedding_timeout_seconds == 4.5
+    assert settings.embedding_requests_per_minute == 7
+    assert settings.embedding_tokens_per_minute == 12000
+    assert settings.embedding_batch_tokens == 6000
     assert settings.max_output_tokens == 600
     assert settings.max_tool_calls == 3
     assert settings.anthropic_key == "secret-claude"
-    assert settings.hf_token == "secret-hf"
+    assert settings.voyage_key == "secret-voyage"
     assert "secret-" not in repr(settings)
 
 
-def test_a_custom_model_does_not_inherit_qwen_query_instructions(
+def test_old_hf_credentials_cannot_authorize_the_new_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep an unset custom-model prefix distinct from the default Qwen retrieval format."""
-    monkeypatch.setenv("EMBEDDING_MODEL", "organization/plain-model")
-    assert Settings.from_env().embedding.query_prefix == ""
+    """Require the explicit Voyage credential instead of reusing an unrelated service's key."""
+    monkeypatch.setenv("HF_TOKEN", "old-service-secret")
+    assert Settings.from_env().voyage_key == ""
 
 
-def test_explicitly_empty_prefixes_override_model_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let plain-text models opt out rather than restoring prefixes through truthiness fallback."""
-    monkeypatch.setenv("EMBEDDING_QUERY_PREFIX", "")
-    monkeypatch.setenv("EMBEDDING_DOCUMENT_PREFIX", "")
+def test_blank_tokenizer_settings_use_the_default_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep empty optional overrides available for the pinned default tokenizer profile."""
     monkeypatch.setenv("EMBEDDING_TOKENIZER_MODEL", " ")
     monkeypatch.setenv("EMBEDDING_TOKENIZER_REVISION", "")
     settings = Settings.from_env()
-    assert settings.embedding.query_prefix == ""
-    assert settings.embedding.document_prefix == ""
     assert settings.tokenizer_model is None
     assert settings.tokenizer_revision is None
 
@@ -153,6 +153,15 @@ def test_explicitly_empty_prefixes_override_model_defaults(monkeypatch: pytest.M
         ("EMBEDDING_DIMENSIONS", "0"),
         ("EMBEDDING_DIMENSIONS", "-1"),
         ("EMBEDDING_DIMENSIONS", "1.5"),
+        ("EMBEDDING_REQUESTS_PER_MINUTE", "0"),
+        ("EMBEDDING_REQUESTS_PER_MINUTE", "-1"),
+        ("EMBEDDING_REQUESTS_PER_MINUTE", "1.5"),
+        ("EMBEDDING_TOKENS_PER_MINUTE", "0"),
+        ("EMBEDDING_TOKENS_PER_MINUTE", "-1"),
+        ("EMBEDDING_TOKENS_PER_MINUTE", "invalid"),
+        ("EMBEDDING_BATCH_TOKENS", "0"),
+        ("EMBEDDING_BATCH_TOKENS", "-1"),
+        ("EMBEDDING_BATCH_TOKENS", "inf"),
         ("CLAUDE_MAX_TOKENS", "0"),
         ("CLAUDE_MAX_TOKENS", "-1"),
         ("CLAUDE_MAX_TOKENS", "invalid"),
@@ -197,7 +206,7 @@ def test_chunk_window_rejects_inconsistent_limits(
 
 
 @pytest.mark.parametrize(
-    "name", ["CLAUDE_MODEL", "EMBEDDING_MODEL", "EMBEDDING_PROVIDER", "STORE_TIMEZONE", "DATA_DIR"]
+    "name", ["CLAUDE_MODEL", "EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "STORE_TIMEZONE", "DATA_DIR"]
 )
 def test_required_settings_reject_empty_overrides(
     monkeypatch: pytest.MonkeyPatch, name: str
@@ -208,14 +217,31 @@ def test_required_settings_reject_empty_overrides(
         Settings.from_env()
 
 
-@pytest.mark.parametrize("provider", ["auto", "AUTO"])
-def test_embedding_provider_must_be_explicit(
-    monkeypatch: pytest.MonkeyPatch, provider: str
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://ai.mongodb.com/v1",
+        "https://user:secret@ai.mongodb.com/v1",
+        "https://@ai.mongodb.com/v1",
+        "https://ai.mongodb.com/v1?api_key=secret",
+        "https://ai.mongodb.com/v1#secret",
+        "https://ai.mongodb.com/v1?",
+        "https://ai.mongodb.com/v1#",
+        "https:///v1",
+        "https://ai.mongodb.com:invalid/v1",
+        "https://ai.mongodb.com:70000/v1",
+        "https://[invalid/v1",
+        "https://ai.mongodb.com/\npath",
+    ],
+)
+def test_embedding_endpoint_rejects_insecure_or_ambiguous_urls(
+    monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
-    """Prevent the API client from choosing a different provider behind the configured profile."""
-    monkeypatch.setenv("EMBEDDING_PROVIDER", provider)
-    with pytest.raises(ValueError, match="EMBEDDING_PROVIDER"):
+    """Require HTTPS and keep credentials out of endpoints, query strings and diagnostics."""
+    monkeypatch.setenv("EMBEDDING_BASE_URL", url)
+    with pytest.raises(ValueError, match="EMBEDDING_BASE_URL") as captured:
         Settings.from_env()
+    assert "secret" not in str(captured.value)
 
 
 @pytest.mark.parametrize("timezone", ["Mars/Olympus", "../UTC"])

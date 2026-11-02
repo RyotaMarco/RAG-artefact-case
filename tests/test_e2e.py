@@ -162,6 +162,7 @@ def store_server(tmp_path: Path) -> Iterator[Callable[[str], RunningStore]]:
             data_dir.mkdir()
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("VOYAGE_API_KEY", None)
         env.pop("HF_TOKEN", None)
         env["EMPORIO_E2E_DATA_DIR"] = str(data_dir)
         env["EMPORIO_E2E_RUNTIME_DIR"] = str(runtime_dir)
@@ -340,7 +341,7 @@ def test_browser_contexts_do_not_share_history_or_order_access(
     ("scenario", "message"),
     [
         ("missing-key", "Chat is not configured yet."),
-        ("missing-hf", "HF_TOKEN is required to index the supplied PDFs."),
+        ("missing-voyage", "VOYAGE_API_KEY is required to index the supplied PDFs."),
         ("missing-sources", "The data directory contains no supported CSV or PDF files."),
     ],
 )
@@ -352,6 +353,11 @@ def test_missing_configuration_or_sources_disables_chat(
     page.goto(server.url)
     expect(page.get_by_text(message, exact=False)).to_be_visible(timeout=20_000)
     expect(page.get_by_placeholder("Ask the store a question")).to_be_disabled()
+    retry = page.get_by_role("button", name="Retry loading sources", exact=True)
+    if scenario == "missing-key":
+        expect(retry).to_have_count(0)
+    else:
+        expect(retry).to_be_visible()
 
 
 def test_request_failure_recovers_without_restarting_application(
@@ -368,3 +374,31 @@ def test_request_failure_recovers_without_restarting_application(
     expect(page.get_by_text("Bluejay Acoustic Guitar costs BRL 123.45.", exact=True)).to_be_visible(
         timeout=20_000
     )
+
+
+def test_source_loading_retry_preserves_conversation_and_recovers_after_repair(
+    page: Page, store_server: Callable[[str], RunningStore]
+) -> None:
+    """Retry a failed source refresh without losing the saved chat URL or its existing history."""
+    server = store_server("normal")
+    page.goto(server.url)
+    _ask(page, "What is the price of Bluejay Acoustic Guitar?")
+    answer = "Bluejay Acoustic Guitar costs BRL 123.45."
+    expect(page.get_by_text(answer, exact=True)).to_be_visible(timeout=20_000)
+    saved = page.url
+    invalid = server.data_dir / "invalid.csv"
+    invalid.write_text("unsupported,columns\na,b\n", encoding="utf-8")
+    _ask(page, "Check the price again.")
+    expect(page.get_by_text("Invalid source 'invalid.csv'", exact=False)).to_be_visible(
+        timeout=20_000
+    )
+    expect(page.get_by_placeholder("Ask the store a question")).to_be_disabled()
+    assert page.url == saved
+
+    invalid.unlink()
+    page.get_by_role("button", name="Retry loading sources", exact=True).click()
+    expect(page.get_by_placeholder("Ask the store a question")).to_be_enabled(timeout=20_000)
+    expect(page.get_by_text(answer, exact=True)).to_be_visible(timeout=20_000)
+    assert page.url == saved
+    _ask(page, "Check the price again.")
+    expect(page.get_by_text(answer, exact=True).last).to_be_visible(timeout=20_000)
