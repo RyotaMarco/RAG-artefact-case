@@ -408,3 +408,85 @@ def test_real_catalog_order_combines_regular_and_promotional_products(
     credit = store.calculate_quote(order, payment_method="credit")
     assert (credit["total"], credit["metro_region_shipping"]) == ("R$ 988,20", "R$ 0,00")
     assert store.calculate_quote(order)["total"] == "R$ 960,75"
+
+
+def split(
+    store: StoreTools, first: str, amount: str, second: str, **installments: int
+) -> dict[str, object]:
+    """Call the split tool on the fixture order of products 101 and 202."""
+    return store.calculate_split_payment(BOTH, first, amount, second, **installments)
+
+
+def test_split_payment_needs_an_order_above_two_thousand_reais(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """Exactly R$ 2.000,00 is refused; R$ 2.000,01 splits at catalog prices without PIX off."""
+    refused = split(tools(order_snapshot(manual, 175001), tmp_path), "pix", "1000.00", "credit")
+    assert "above R$ 2.000,00; this order totals R$ 2.000,00" in str(refused["error"])
+    store = tools(order_snapshot(manual, 175002), tmp_path / "ok")
+    result = split(store, "pix", "1000.00", "credit", second_installments=10)
+    assert result["total"] == "R$ 2.000,01"
+    assert result["payments"] == [
+        {
+            "method": "pix",
+            "amount": "R$ 1.000,00",
+            "installments": 1,
+            "installment_amounts": ["R$ 1.000,00"],
+        },
+        {
+            "method": "credit",
+            "amount": "R$ 1.000,01",
+            "installments": 10,
+            "installment_amounts": ["R$ 100,01"] + ["R$ 100,00"] * 9,
+        },
+    ]
+    assert result["metro_region_shipping"] == "R$ 0,00"
+    assert "confirmed when finalizing the purchase" in str(result["note"])
+    assert "without the PIX discount" in str(result["note"])
+    assert any(source.get("section") == "3.1 Regras de Parcelamento" for source in store.sources)
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs", "message"),
+    [
+        (("boleto", "1000.00", "credit"), {}, "Boleto takes up to 3 business days"),
+        (("pix", "1000.00", "boleto"), {}, "Boleto takes up to 3 business days"),
+        (("credit", "1000.00", "credit"), {}, "two different methods"),
+        (("pix", "1500.00", "credit"), {"second_installments": 12}, "minimum"),
+        (("pix", "1000.00", "debit"), {"first_installments": 2}, "single payment"),
+        (("pix", "0.00", "credit"), {}, "above zero"),
+        (("pix", "2000.01", "credit"), {}, "below R$ 2.000,01"),
+        (("pix", "1.000,00", "credit"), {}, "decimal"),
+    ],
+)
+def test_split_payment_rejects_unsupported_methods_and_amounts(
+    manual: Snapshot,
+    tmp_path: Path,
+    args: tuple[str, str, str],
+    kwargs: dict[str, int],
+    message: str,
+) -> None:
+    """Boleto, repeated methods, credit below the minimum and impossible amounts are refused."""
+    result = split(tools(order_snapshot(manual, 175002), tmp_path), *args, **kwargs)
+    assert message in str(result["error"])
+    assert "payments" not in result
+
+
+def test_debit_and_credit_split_on_a_real_promotional_product(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """Taylor 110e (8% off R$ 5.999,00) splits debit R$ 2.000,00 + credit 10x of R$ 3.519,08."""
+    result = tools(manual, tmp_path).calculate_split_payment(
+        [{"product_id": 94, "quantity": 1}], "debit", "2000.00", "credit", second_installments=10
+    )
+    assert result["total"] == "R$ 5.519,08"
+    payments = cast(list[dict[str, object]], result["payments"])
+    assert payments[1]["installment_amounts"] == ["R$ 351,91"] * 8 + ["R$ 351,90"] * 2
+
+
+def test_split_payment_fails_closed_without_the_manual_clause(tmp_path: Path) -> None:
+    """A manual without the combined-payment clause gives no split."""
+    result = tools(small_snapshot(), tmp_path).calculate_split_payment(
+        [{"product_id": 101}], "pix", "50.00", "credit"
+    )
+    assert "does not confirm combined payments" in str(result["error"])

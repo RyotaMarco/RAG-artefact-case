@@ -470,6 +470,7 @@ def test_store_fact_tools_reach_the_model_with_matching_instructions(tmp_path: P
         "verify_order",
         "query_data",
         "calculate_quote",
+        "calculate_split_payment",
     )
     with _agent(
         _settings(tmp_path), small_snapshot(), conversation_token(), [text_response("Hi!")]

@@ -42,7 +42,18 @@ RULE_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
         ("5.1", "taxa fixa de R$ 35,00"),
     ),
     "complaints": (("7.3", "Prazo de retorno: 24 horas úteis"),),
+    "mixed_payment": (
+        (
+            "3.1",
+            "Combinação de formas de pagamento: permitida (ex.: PIX + cartão) "
+            "para compras acima de R$ 2.000,00",
+        ),
+    ),
 }
+
+# Owner rulings for combined payments: two different methods, catalog prices without the PIX
+# discount, and no boleto because it takes up to three business days to clear.
+SPLIT_METHODS = ("pix", "credit", "debit")
 
 
 def _flat(text: str) -> str:
