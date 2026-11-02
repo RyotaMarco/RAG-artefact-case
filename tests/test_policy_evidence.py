@@ -537,3 +537,12 @@ def test_mask_keeps_every_non_contact_number_in_the_manual(manual: Snapshot) -> 
     masked = evidence.mask(overview.text)
     assert "12.345.678/0001-90" in masked
     assert "79202-333" in masked
+
+
+def test_evidence_is_computed_once_per_snapshot(manual: Snapshot, tmp_path: Path) -> None:
+    """Every turn's tools share the snapshot's evidence; a new snapshot recomputes it."""
+    first = tools(manual, tmp_path)
+    second = tools(manual, tmp_path / "other")
+    assert first.evidence is second.evidence is manual.evidence
+    assert replace(manual, policies=None).evidence is not manual.evidence
+    assert not replace(manual, policies=None).evidence.has("hours")

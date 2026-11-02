@@ -31,7 +31,6 @@ from emporio_agent.money import (
     split_installments,
 )
 from emporio_agent.policies import PolicyUnavailableError, normalize_method
-from emporio_agent.policy_evidence import PolicyEvidence
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine, QueryError
 from emporio_agent.store_rules import (
@@ -203,7 +202,7 @@ class StoreTools:
         self.access = access
         self.timezone = ZoneInfo(timezone)
         self.engine = QueryEngine(snapshot.catalog)
-        self.evidence = PolicyEvidence(snapshot.policies.sections if snapshot.policies else ())
+        self.evidence = snapshot.evidence
         self.sources: list[dict[str, object]] = []
         self.query_failures = 0
 
