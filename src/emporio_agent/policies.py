@@ -196,6 +196,16 @@ def _installment_rules(
         terms = match.group(4)
         amount_match = re.search(r"parcela\s+minima\s+de\s+r\$\s*" + _MONEY_PATTERN, terms)
         minimum = _amount(amount_match.group(1)) if amount_match else None
+        # "Sem valor minimo (exceto abaixo de R$ X)" states a R$ X installment floor.
+        floor = re.search(
+            r"sem valor minimo de parcela\s*\(\s*exceto abaixo de r\$\s*"
+            + _MONEY_PATTERN
+            + r"\s*\)",
+            terms,
+        )
+        if minimum is None and floor is not None:
+            minimum = _amount(floor.group(1))
+            terms = terms.replace(floor.group(0), "")
         ambiguous = "exceto" in terms or "sem juros" not in terms
         if minimum is None and "sem valor minimo" not in terms:
             ambiguous = True

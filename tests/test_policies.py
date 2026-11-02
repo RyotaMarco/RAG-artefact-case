@@ -89,8 +89,8 @@ def test_duplicate_rules_merge_evidence_without_conflict() -> None:
     assert rules.quote(Decimal("100.00")).total == Decimal("94.00")
 
 
-def test_ambiguous_exception_never_becomes_an_invented_minimum() -> None:
-    """The supplied under-three-installment exception requires clarification."""
+def test_exception_below_amount_is_the_installment_floor() -> None:
+    """The under-three-installment exception sets a R$ 50,00 minimum per installment."""
     rules = extract_rules(
         (
             section(
@@ -99,6 +99,29 @@ def test_ambiguous_exception_never_becomes_an_invented_minimum() -> None:
             ),
         )
     )
+    tier = rules.installment_tiers[0]
+    assert (tier.minimum_count, tier.maximum_count) == (1, 3)
+    assert tier.minimum_amount == Decimal("50.00")
+    assert not tier.ambiguous
+    assert rules.quote(
+        Decimal("150.00"), payment_method="credit", installments=3
+    ).installment_amount == Decimal("50.00")
+    assert rules.quote(Decimal("50.00"), payment_method="credit").total == Decimal("50.00")
+    for price, count in ((Decimal("149.99"), 3), (Decimal("49.99"), 1)):
+        with pytest.raises(PolicyUnavailableError, match="minimum"):
+            rules.quote(price, payment_method="credit", installments=count)
+
+
+@pytest.mark.parametrize(
+    "terms",
+    [
+        "sem juros, sem valor mínimo de parcela (exceto para produtos importados).",
+        "sem juros, parcela mínima de R$ 30,00 (exceto abaixo de R$ 50,00).",
+    ],
+)
+def test_other_exceptions_never_become_an_invented_minimum(terms: str) -> None:
+    """Only the recognized floor wording resolves an exception; anything else needs staff."""
+    rules = extract_rules((section(f"Parcelamento em até 3x: {terms}"),))
     assert rules.installment_tiers[0].ambiguous
     with pytest.raises(PolicyUnavailableError, match="ambiguous"):
         rules.quote(Decimal("600.00"), payment_method="credit", installments=3)
@@ -123,14 +146,31 @@ def test_actual_manual_extracts_payment_values_without_fallbacks() -> None:
     assert set(rules.single_payment_methods) == {"debit", "boleto"}
     assert rules.quote(Decimal("100.01"), payment_method="debit").total == Decimal("100.01")
     assert rules.quote(Decimal("100.01"), payment_method="boleto").total == Decimal("100.01")
-    assert {(tier.minimum_count, tier.maximum_count) for tier in rules.installment_tiers} == {
-        (1, 3),
-        (4, 6),
-        (7, 12),
+    assert {
+        (tier.minimum_count, tier.maximum_count, tier.minimum_amount, tier.ambiguous)
+        for tier in rules.installment_tiers
+    } == {
+        (1, 3, Decimal("50.00"), False),
+        (4, 6, Decimal("80.00"), False),
+        (7, 12, Decimal("100.00"), False),
     }
     assert rules.quote(
         Decimal("1200.00"), payment_method="credit", installments=12
     ).installment_amount == Decimal("100.00")
+    assert rules.quote(
+        Decimal("159.90"), payment_method="credit", installments=3
+    ).installment_amount == Decimal("53.30")
+    assert rules.quote(
+        Decimal("450.00"), payment_method="credit", installments=5
+    ).installment_amount == Decimal("90.00")
+    for price, count in (
+        (Decimal("40.00"), 1),
+        (Decimal("399.99"), 5),
+        (Decimal("1199.99"), 12),
+        (Decimal("5000.00"), 13),
+    ):
+        with pytest.raises(PolicyUnavailableError):
+            rules.quote(price, payment_method="credit", installments=count)
 
 
 def test_missing_rules_never_use_fixture_defaults() -> None:
