@@ -7,7 +7,7 @@ import pytest
 from pypdf import PdfReader
 
 from emporio_agent.documents import Citation, PolicySection
-from emporio_agent.policies import PolicyUnavailableError, extract_rules
+from emporio_agent.policies import PolicyUnavailableError, extract_rules, normalize_method
 
 
 def section(text: str, source: str = "policy.pdf") -> PolicySection:
@@ -276,3 +276,18 @@ def test_diverging_payment_table_blocks_every_quote(row: str) -> None:
     )
     with pytest.raises(PolicyUnavailableError, match="staff confirmation"):
         rules.quote(Decimal("1200.00"), payment_method="credit", installments=12)
+
+
+@pytest.mark.parametrize(
+    ("name", "method"),
+    [
+        (" PIX ", "pix"),
+        ("Credit_Card", "credit"),
+        ("debit_card", "debit"),
+        ("bank_slip", "boleto"),
+        ("boleto", "boleto"),
+    ],
+)
+def test_payment_method_aliases_share_one_normalization(name: str, method: str) -> None:
+    """Quote and split payment read method names through the same mapping."""
+    assert normalize_method(name) == method

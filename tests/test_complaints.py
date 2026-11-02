@@ -39,7 +39,7 @@ def rows(tmp_path: Path) -> list[tuple[object, ...]]:
     """Read stored complaints the way staff would."""
     with closing(sqlite3.connect(tmp_path / "sessions.sqlite3")) as connection:
         return connection.execute(
-            "SELECT protocol, created_at, order_id, summary, status FROM complaints"
+            "SELECT protocol, created_at, order_id, summary, status, email FROM complaints"
         ).fetchall()
 
 
@@ -70,6 +70,7 @@ def test_verified_order_complaint_is_recorded_with_a_protocol(
             501,
             "A caixa chegou amassada e o violão está riscado.",
             "open",
+            "alex@example.test",
         )
     ]
     assert any(source.get("section") == "7.3 Situações Especiais" for source in store.sources)
@@ -106,7 +107,9 @@ def test_personal_data_is_redacted_before_storage(tmp_path: Path) -> None:
         NOW,
     )
     (summary,) = rows(tmp_path)[0][3:4]
-    assert summary == (f"Me liguem no {REDACTED} ou {REDACTED}, email {REDACTED}, CPF {REDACTED}.")
+    assert summary == (
+        f"Me liguem no {REDACTED} ou {REDACTED}, email ana@exemplo.com, CPF {REDACTED}."
+    )
 
 
 def test_summary_length_and_conversation_limit(tmp_path: Path) -> None:
@@ -127,3 +130,20 @@ def test_complaints_fail_closed_without_a_confirming_manual(tmp_path: Path) -> N
     store = tools(small_snapshot(), tmp_path)
     assert store.verify_order(501, "alex@example.test")["verified"] is True
     assert "does not confirm" in str(store.register_complaint("Produto com defeito.")["error"])
+
+
+def test_existing_complaint_table_gains_the_email_column(tmp_path: Path) -> None:
+    """A table created before the email column is migrated without losing rows."""
+    database = tmp_path / "sessions.sqlite3"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(
+            "CREATE TABLE complaints (protocol TEXT PRIMARY KEY, created_at TEXT NOT NULL, "
+            "order_id INTEGER NOT NULL, conversation TEXT NOT NULL, summary TEXT NOT NULL, "
+            "status TEXT NOT NULL DEFAULT 'open') STRICT"
+        )
+        connection.execute(
+            "INSERT INTO complaints (protocol, created_at, order_id, conversation, summary) "
+            "VALUES ('REC-OLD', 'x', 1, 'c', 'Antiga reclamação')"
+        )
+    record_complaint(database, "c2", 501, "Produto com defeito.", NOW, email="a@b.com")
+    assert [row[5] for row in rows(tmp_path)] == [None, "a@b.com"]

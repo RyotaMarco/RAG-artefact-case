@@ -12,15 +12,9 @@ from agent_fixtures import FixedEmbedder, manual_snapshot, small_snapshot
 
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import PolicyIndex, PolicySection
-from emporio_agent.policy_evidence import (
-    MASK,
-    RULE_EVIDENCE,
-    PolicyEvidence,
-    metro_shipping_cents,
-    opening_status,
-    return_window,
-)
+from emporio_agent.policy_evidence import MASK, RULE_EVIDENCE, PolicyEvidence
 from emporio_agent.runtime import Snapshot
+from emporio_agent.store_rules import metro_shipping_cents, opening_status, return_window
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -229,6 +223,8 @@ def test_return_windows_count_calendar_days_inclusively(
         ("regret", "online", "2026-11-01", None, "date the product was received"),
         ("preference", "online", "2026-11-01", None, "date the product was received"),
         ("defect", "online", None, "2026-11-01", "purchase date and the receipt date"),
+        ("preference", "store", None, None, "in-store purchases have no separate receipt date"),
+        ("defect", "store", None, None, "in-store purchases have no separate receipt date"),
         ("regret", "phone", "2026-11-01", "2026-11-02", "online or in the physical store"),
         ("refund", "online", "2026-11-01", "2026-11-02", "regret, preference or defect"),
         ("regret", "online", "2026-11-01", "2026-11-21", "cannot be in the future"),
@@ -456,7 +452,7 @@ def test_split_payment_needs_an_order_above_two_thousand_reais(
         (("pix", "1000.00", "debit"), {"first_installments": 2}, "single payment"),
         (("pix", "0.00", "credit"), {}, "above zero"),
         (("pix", "2000.01", "credit"), {}, "below R$ 2.000,01"),
-        (("pix", "1.000,00", "credit"), {}, "decimal"),
+        (("pix", "1,000", "credit"), {}, "write it again"),
     ],
 )
 def test_split_payment_rejects_unsupported_methods_and_amounts(
@@ -490,3 +486,63 @@ def test_split_payment_fails_closed_without_the_manual_clause(tmp_path: Path) ->
         [{"product_id": 101}], "pix", "50.00", "credit"
     )
     assert "does not confirm combined payments" in str(result["error"])
+
+
+@pytest.mark.parametrize("typed", ["1000", "1.000", "1.000,00", "R$ 1.000,00", "1000.00"])
+def test_split_payment_reads_the_amount_as_the_customer_wrote_it(
+    manual: Snapshot, tmp_path: Path, typed: str
+) -> None:
+    """Brazilian thousands separators never turn R$ 1.000 into R$ 1,00."""
+    result = split(tools(order_snapshot(manual, 175002), tmp_path), "pix", typed, "credit")
+    payments = cast(list[dict[str, object]], result["payments"])
+    assert [payment["amount"] for payment in payments] == ["R$ 1.000,00", "R$ 1.000,01"]
+
+
+@pytest.mark.parametrize(
+    ("first", "change"),
+    [
+        ("debit", {"single_payment_methods": ("boleto",)}),
+        ("pix", {"pix_rate": None}),
+    ],
+)
+def test_split_payment_requires_methods_the_manual_lists(
+    manual: Snapshot, tmp_path: Path, first: str, change: dict[str, object]
+) -> None:
+    """A method the active manual no longer lists is refused, as calculate_quote does."""
+    snapshot = order_snapshot(manual, 175002)
+    snapshot = replace(snapshot, rules=replace(snapshot.rules, **change))
+    result = split(tools(snapshot, tmp_path), first, "1000", "credit")
+    assert f"does not list {first} payments" in str(result["error"])
+
+
+@pytest.mark.parametrize(
+    "internal",
+    ["(11) 2345-6789", "11 2345 6789", "(11)23456789", "+55 11 2345.6789", "+55 (11) 98765-4321"],
+)
+def test_mask_hides_internal_phones_in_any_common_format(manual: Snapshot, internal: str) -> None:
+    """Spaces, dots, a missing hyphen or +55 never let an internal phone through."""
+    evidence = PolicyEvidence(sections(manual))
+    assert evidence.mask(f"Ligue {internal} hoje.") == f"Ligue {MASK} hoje."
+    assert evidence.mask("WhatsApp +55 (67) 3321-4500.") == "WhatsApp +55 (67) 3321-4500."
+
+
+def test_mask_keeps_every_non_contact_number_in_the_manual(manual: Snapshot) -> None:
+    """Only the cover and section 1.2 change; CEP, CNPJ, prices and dates stay intact."""
+    evidence = PolicyEvidence(sections(manual))
+    changed = {
+        section.title for section in sections(manual) if evidence.mask(section.text) != section.text
+    }
+    assert changed == {"Document overview", "1.2 Dados da Empresa"}
+    overview = next(s for s in sections(manual) if s.title == "1.2 Dados da Empresa")
+    masked = evidence.mask(overview.text)
+    assert "12.345.678/0001-90" in masked
+    assert "79202-333" in masked
+
+
+def test_evidence_is_computed_once_per_snapshot(manual: Snapshot, tmp_path: Path) -> None:
+    """Every turn's tools share the snapshot's evidence; a new snapshot recomputes it."""
+    first = tools(manual, tmp_path)
+    second = tools(manual, tmp_path / "other")
+    assert first.evidence is second.evidence is manual.evidence
+    assert replace(manual, policies=None).evidence is not manual.evidence
+    assert not replace(manual, policies=None).evidence.has("hours")

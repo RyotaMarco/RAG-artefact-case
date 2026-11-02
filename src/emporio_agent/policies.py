@@ -8,6 +8,14 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from emporio_agent.documents import Citation, PolicySection
 from emporio_agent.money import canonical_rate
 
+_METHOD_ALIASES = {"credit_card": "credit", "debit_card": "debit", "bank_slip": "boleto"}
+
+
+def normalize_method(name: str) -> str:
+    """Map a payment method name or alias to pix, credit, debit or boleto."""
+    method = name.casefold().strip()
+    return _METHOD_ALIASES.get(method, method)
+
 
 class PolicyUnavailableError(ValueError):
     """A source policy is missing, contradictory or ambiguous for a calculation."""
@@ -66,15 +74,14 @@ class FinancialRuleSet:
             raise ValueError("Installment count must be positive.")
         if self.conflicts:
             raise PolicyUnavailableError("Conflicting source policies require staff confirmation.")
-        method = payment_method.casefold().strip()
-        method = {"debit_card": "debit", "bank_slip": "boleto"}.get(method, method)
+        method = normalize_method(payment_method)
         if method in self.single_payment_methods:
             if installments != 1:
                 raise PolicyUnavailableError("This sourced payment method requires one payment.")
             return PaymentQuote(price, 1, price, Decimal(0), self.citations)
         if method == "pix":
             return self._pix_quote(price, installments, promotional)
-        if method not in {"credit", "credit_card"}:
+        if method != "credit":
             raise PolicyUnavailableError("This payment method has no supported calculation rule.")
         return self._credit_quote(price, installments)
 
