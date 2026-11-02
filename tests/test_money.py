@@ -10,6 +10,7 @@ from emporio_agent.money import (
     check_cents,
     discounted_cents,
     format_brl,
+    parse_customer_amount,
     parse_money_cents,
     round_cents,
     split_installments,
@@ -65,3 +66,33 @@ def test_invalid_percentages_are_rejected(rate: str) -> None:
     """Keep percentage inputs finite and explicitly decimal."""
     with pytest.raises(ValueError):
         discounted_cents(100, rate)
+
+
+@pytest.mark.parametrize(
+    ("typed", "cents"),
+    [
+        ("1000", 100000),
+        ("1.000", 100000),
+        ("1.000,50", 100050),
+        ("1000,5", 100050),
+        ("R$ 1.000,00", 100000),
+        ("  r$1.299,90 ", 129990),
+        ("12.345.678", 1234567800),
+        ("1000.50", 100050),
+        ("1,000.50", 100050),
+        ("0,05", 5),
+        ("150", 15000),
+    ],
+)
+def test_customer_amounts_read_brazilian_and_english_forms(typed: str, cents: int) -> None:
+    """A dot followed by three digits is a thousands separator, never R$ 1,00."""
+    assert parse_customer_amount(typed) == cents
+
+
+@pytest.mark.parametrize(
+    "typed", ["1,000", "1.00.0", "1.0000", "1000,505", "-100", "mil reais", "", "1.000.50", "1e3"]
+)
+def test_ambiguous_customer_amounts_ask_to_write_again(typed: str) -> None:
+    """Ambiguous or invalid amounts are refused with a kind request for a valid value."""
+    with pytest.raises(ValueError, match="Kindly ask the customer to write it again"):
+        parse_customer_amount(typed)

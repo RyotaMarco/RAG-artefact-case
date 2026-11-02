@@ -27,7 +27,7 @@ from emporio_agent.money import (
     check_cents,
     discounted_cents,
     format_brl,
-    parse_money_cents,
+    parse_customer_amount,
     split_installments,
 )
 from emporio_agent.policies import PolicyUnavailableError
@@ -527,7 +527,8 @@ class StoreTools:
         Parameters:
             items: Every product in the order as {"product_id": id, "quantity": n}.
             first_method: pix, credit or debit.
-            first_amount: Amount the customer stated for the first method, like "1000.00".
+            first_amount: Amount the customer stated for the first method, as written, like
+                "1.000" or "1.000,50".
             second_method: A different method among pix, credit and debit; it pays the rest.
             first_installments: Credit installments for the first part, otherwise 1.
             second_installments: Credit installments for the second part, otherwise 1.
@@ -563,7 +564,7 @@ class StoreTools:
                     f"Combined payment requires an order above {format_brl(minimum)}; this "
                     f"order totals {format_brl(total)}."
                 )
-            first = parse_money_cents(first_amount)
+            first = parse_customer_amount(first_amount)
             if not 0 < first < total:
                 raise ValueError(
                     f"The first amount must be above zero and below {format_brl(total)}."

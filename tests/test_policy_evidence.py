@@ -456,7 +456,7 @@ def test_split_payment_needs_an_order_above_two_thousand_reais(
         (("pix", "1000.00", "debit"), {"first_installments": 2}, "single payment"),
         (("pix", "0.00", "credit"), {}, "above zero"),
         (("pix", "2000.01", "credit"), {}, "below R$ 2.000,01"),
-        (("pix", "1.000,00", "credit"), {}, "decimal"),
+        (("pix", "1,000", "credit"), {}, "write it again"),
     ],
 )
 def test_split_payment_rejects_unsupported_methods_and_amounts(
@@ -490,3 +490,13 @@ def test_split_payment_fails_closed_without_the_manual_clause(tmp_path: Path) ->
         [{"product_id": 101}], "pix", "50.00", "credit"
     )
     assert "does not confirm combined payments" in str(result["error"])
+
+
+@pytest.mark.parametrize("typed", ["1000", "1.000", "1.000,00", "R$ 1.000,00", "1000.00"])
+def test_split_payment_reads_the_amount_as_the_customer_wrote_it(
+    manual: Snapshot, tmp_path: Path, typed: str
+) -> None:
+    """Brazilian thousands separators never turn R$ 1.000 into R$ 1,00."""
+    result = split(tools(order_snapshot(manual, 175002), tmp_path), "pix", typed, "credit")
+    payments = cast(list[dict[str, object]], result["payments"])
+    assert [payment["amount"] for payment in payments] == ["R$ 1.000,00", "R$ 1.000,01"]
