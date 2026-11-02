@@ -232,14 +232,14 @@ def test_chat_queries_real_data_and_refreshes_changed_sources(
     server = store_server("normal")
     page.goto(server.url)
     _ask(page, "What is the price of Bluejay Acoustic Guitar?")
-    expect(page.get_by_text("Bluejay Acoustic Guitar costs BRL 123.45.", exact=True)).to_be_visible(
+    expect(page.get_by_text("Bluejay Acoustic Guitar costs R$ 123,45.", exact=True)).to_be_visible(
         timeout=20_000
     )
     page.get_by_text("Sources consulted", exact=True).click()
     expect(page.get_by_text("renamed-catalog.csv", exact=True)).to_be_visible()
     write_sources(server.data_dir, price="234.56")
     _ask(page, "Check the price again.")
-    expect(page.get_by_text("Bluejay Acoustic Guitar costs BRL 234.56.", exact=True)).to_be_visible(
+    expect(page.get_by_text("Bluejay Acoustic Guitar costs R$ 234,56.", exact=True)).to_be_visible(
         timeout=20_000
     )
 
@@ -371,7 +371,7 @@ def test_request_failure_recovers_without_restarting_application(
         timeout=20_000
     )
     _ask(page, "What is the price of Bluejay Acoustic Guitar?")
-    expect(page.get_by_text("Bluejay Acoustic Guitar costs BRL 123.45.", exact=True)).to_be_visible(
+    expect(page.get_by_text("Bluejay Acoustic Guitar costs R$ 123,45.", exact=True)).to_be_visible(
         timeout=20_000
     )
 
@@ -383,7 +383,7 @@ def test_source_loading_retry_preserves_conversation_and_recovers_after_repair(
     server = store_server("normal")
     page.goto(server.url)
     _ask(page, "What is the price of Bluejay Acoustic Guitar?")
-    answer = "Bluejay Acoustic Guitar costs BRL 123.45."
+    answer = "Bluejay Acoustic Guitar costs R$ 123,45."
     expect(page.get_by_text(answer, exact=True)).to_be_visible(timeout=20_000)
     saved = page.url
     invalid = server.data_dir / "invalid.csv"
