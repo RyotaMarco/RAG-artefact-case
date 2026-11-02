@@ -3,7 +3,7 @@
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from emporio_agent.documents import Citation, PolicySection
 
@@ -350,3 +350,75 @@ def opening_status(now: datetime) -> dict[str, object]:
     if is_open and hours is not None:
         status["closes_at"] = f"{hours[1]:%H:%M}"
     return status
+
+
+# Calendar-day windows from manual sections 4.1-4.3 and 8.1 and the owner's rulings.
+RETURN_FACTS = {"regret": "regret", "preference": "preference_exchange", "defect": "defect"}
+_CHANNELS = ("online", "store")
+
+
+def _day(value: str | None, label: str, today: date) -> date | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = date.fromisoformat(value.strip())
+    except ValueError as error:
+        raise ValueError(f"The {label} must be a YYYY-MM-DD date.") from error
+    if parsed > today:
+        raise ValueError(f"The {label} cannot be in the future.")
+    return parsed
+
+
+def _window(start: date, days: int, today: date) -> dict[str, object]:
+    deadline = start + timedelta(days=days)
+    return {
+        "deadline": deadline.isoformat(),
+        "within_window": today <= deadline,
+        "days_left": max((deadline - today).days, 0),
+    }
+
+
+def return_window(
+    reason: str, channel: str, purchased_on: str | None, received_on: str | None, today: date
+) -> dict[str, object]:
+    """Evaluate customer-supplied dates; never infer receipt from order or delivery estimates.
+
+    Raises:
+        ValueError: The reason, channel or a required date is missing or invalid.
+    """
+    if reason not in RETURN_FACTS:
+        raise ValueError("Reason must be regret, preference or defect.")
+    if channel not in _CHANNELS:
+        raise ValueError("Ask whether the purchase was online or in the physical store.")
+    purchased = _day(purchased_on, "purchase date", today)
+    received = _day(received_on, "receipt date", today)
+    if channel == "store":
+        received = received or purchased
+    if purchased is not None and received is not None and received < purchased:
+        raise ValueError("The receipt date cannot be before the purchase date.")
+    result: dict[str, object] = {"reason": reason, "channel": channel}
+    if reason == "regret" and channel == "store":
+        result["applicable"] = False
+        result["explanation"] = (
+            "The right of withdrawal covers online purchases only. Offer a preference exchange."
+        )
+        return result
+    if reason in {"regret", "preference"}:
+        if received is None:
+            raise ValueError("Ask the customer for the date the product was received.")
+        result.update(_window(received, 7, today))
+        result["conditions"] = (
+            "Original packaging, unused, with all accessories and manuals."
+            if reason == "regret"
+            else "Perfect condition, original packaging, and the desired product available."
+        )
+        return result
+    if purchased is None or received is None:
+        raise ValueError("Ask the customer for the purchase date and the receipt date.")
+    result["store_exchange"] = _window(purchased, 30, today)
+    result["legal_warranty_intermediation"] = _window(received, 90, today)
+    result["conditions"] = (
+        "Manufacturing defects only; misuse, falls, humidity and unauthorized changes are "
+        "not covered."
+    )
+    return result

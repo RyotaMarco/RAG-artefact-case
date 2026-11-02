@@ -25,7 +25,13 @@ from emporio_agent.money import check_cents, discounted_cents, format_brl, split
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine, QueryError
-from emporio_agent.store_facts import TOPICS, StoreFacts, opening_status
+from emporio_agent.store_facts import (
+    RETURN_FACTS,
+    TOPICS,
+    StoreFacts,
+    opening_status,
+    return_window,
+)
 
 INSTRUCTIONS = """
 You are the customer support assistant for the musical instrument store described in the sources.
@@ -234,6 +240,42 @@ class StoreTools:
         status["whatsapp"] = self.facts.whatsapp
         return status
 
+    def check_return_window(
+        self,
+        reason: str,
+        channel: str,
+        purchased_on: str | None = None,
+        received_on: str | None = None,
+    ) -> dict[str, object]:
+        """Check return, exchange or defect deadlines from dates the customer states.
+
+        Parameters:
+            reason: regret (withdrawal), preference (exchange) or defect.
+            channel: online or store, as stated by the customer.
+            purchased_on: Purchase date YYYY-MM-DD, as stated by the customer.
+            received_on: Receipt date YYYY-MM-DD, as stated by the customer. Never use
+                order_date or estimated_delivery from the order records.
+
+        Returns:
+            Deadlines and whether each window is still open, or what to ask for. Not an approval.
+        """
+        key = RETURN_FACTS.get(reason)
+        if key is None or not self.facts.has(key):
+            return {
+                "error": "The active manual does not confirm this rule. Refer the customer to "
+                "staff."
+            }
+        try:
+            result = return_window(reason, channel, purchased_on, received_on, self.now().date())
+        except ValueError as error:
+            return {"error": str(error)}
+        keys = (key, "not_exchangeable") if reason != "defect" else (key,)
+        self.sources.extend(_citations(self.facts.citations(*keys)))
+        result["note"] = (
+            f"Informational only, not an approval. Staff confirm on WhatsApp {self.facts.whatsapp}."
+        )
+        return result
+
     def verify_order(self, order_id: int, email: str) -> dict[str, object]:
         """Verify one order/contact pair before private order queries.
 
@@ -397,6 +439,7 @@ def build_agent(
         tools=[
             tools.store_facts,
             tools.store_open_now,
+            tools.check_return_window,
             tools.search_policies,
             tools.verify_order,
             tools.query_data,

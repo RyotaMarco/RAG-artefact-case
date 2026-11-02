@@ -2,8 +2,9 @@
 
 import re
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,7 +13,14 @@ from agent_fixtures import manual_snapshot, small_snapshot
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import PolicySection
 from emporio_agent.runtime import Snapshot
-from emporio_agent.store_facts import FACTS, MASK, TOPICS, StoreFacts, opening_status
+from emporio_agent.store_facts import (
+    FACTS,
+    MASK,
+    TOPICS,
+    StoreFacts,
+    opening_status,
+    return_window,
+)
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -174,3 +182,97 @@ def test_store_tools_default_clock_uses_the_configured_timezone(
     """The real clock is timezone-aware in the configured store zone."""
     access = ConversationAccess(tmp_path / "s.sqlite3", conversation_token(), "generation")
     assert StoreTools(manual, access, "America/Campo_Grande").now().tzinfo == CAMPO_GRANDE
+
+
+TODAY = date(2026, 11, 20)
+
+
+@pytest.mark.parametrize(
+    ("reason", "channel", "purchased", "received", "field", "deadline", "inside"),
+    [
+        ("regret", "online", "2026-11-01", "2026-11-13", None, "2026-11-20", True),
+        ("regret", "online", "2026-11-01", "2026-11-12", None, "2026-11-19", False),
+        ("preference", "online", "2026-11-01", "2026-11-13", None, "2026-11-20", True),
+        ("preference", "store", "2026-11-13", None, None, "2026-11-20", True),
+        ("defect", "online", "2026-10-21", "2026-10-25", "store_exchange", "2026-11-20", True),
+        ("defect", "online", "2026-10-20", "2026-10-25", "store_exchange", "2026-11-19", False),
+        (
+            "defect",
+            "store",
+            "2026-08-22",
+            None,
+            "legal_warranty_intermediation",
+            "2026-11-20",
+            True,
+        ),
+        (
+            "defect",
+            "online",
+            "2026-08-10",
+            "2026-08-21",
+            "legal_warranty_intermediation",
+            "2026-11-19",
+            False,
+        ),
+    ],
+)
+def test_return_windows_count_calendar_days_inclusively(
+    reason: str,
+    channel: str,
+    purchased: str,
+    received: str | None,
+    field: str | None,
+    deadline: str,
+    inside: bool,
+) -> None:
+    """Regret and preference count from receipt, defects from purchase (30) and receipt (90)."""
+    result = return_window(reason, channel, purchased, received, TODAY)
+    window = cast(dict[str, object], result[field]) if field else result
+    assert window["deadline"] == deadline
+    assert window["within_window"] is inside
+
+
+@pytest.mark.parametrize(
+    ("reason", "channel", "purchased", "received", "message"),
+    [
+        ("regret", "online", "2026-11-01", None, "date the product was received"),
+        ("preference", "online", "2026-11-01", None, "date the product was received"),
+        ("defect", "online", None, "2026-11-01", "purchase date and the receipt date"),
+        ("regret", "phone", "2026-11-01", "2026-11-02", "online or in the physical store"),
+        ("refund", "online", "2026-11-01", "2026-11-02", "regret, preference or defect"),
+        ("regret", "online", "2026-11-01", "2026-11-21", "cannot be in the future"),
+        ("regret", "online", "2026-11-05", "2026-11-02", "before the purchase date"),
+        ("regret", "online", "2026-11-01", "02/11/2026", "YYYY-MM-DD"),
+    ],
+)
+def test_return_window_asks_for_missing_or_invalid_customer_dates(
+    reason: str, channel: str, purchased: str | None, received: str | None, message: str
+) -> None:
+    """Missing receipt or channel is asked for, never assumed."""
+    with pytest.raises(ValueError, match=message):
+        return_window(reason, channel, purchased, received, TODAY)
+
+
+def test_store_purchases_have_no_withdrawal_right() -> None:
+    """In-store regret points to the preference exchange instead of a deadline."""
+    result = return_window("regret", "store", "2026-11-18", None, TODAY)
+    assert result["applicable"] is False
+    assert "preference exchange" in str(result["explanation"])
+    assert "deadline" not in result
+
+
+def test_return_tool_cites_the_manual_and_never_approves(manual: Snapshot, tmp_path: Path) -> None:
+    """The tool result is informational, sourced and points to WhatsApp."""
+    store = tools(manual, tmp_path)
+    store.now = lambda: datetime(2026, 11, 20, 10, 0, tzinfo=CAMPO_GRANDE)
+    result = store.check_return_window("regret", "online", "2026-11-01", "2026-11-13")
+    assert result["within_window"] is True
+    assert "not an approval" in str(result["note"])
+    assert "(67) 3321-4500" in str(result["note"])
+    sections_cited = {str(source["section"]) for source in store.sources}
+    assert "4.1 Direito de Arrependimento (Compras Online)" in sections_cited
+    assert "4.4 Itens Não Elegíveis para Troca" in sections_cited
+    missing = store.check_return_window("regret", "online", "2026-11-01")
+    assert "received" in str(missing["error"])
+    other = tools(small_snapshot(), tmp_path / "other")
+    assert "error" in other.check_return_window("regret", "online", "2026-11-01", "2026-11-13")
