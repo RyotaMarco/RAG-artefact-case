@@ -660,6 +660,7 @@ def test_verified_order_supplies_the_purchase_date_when_not_given(
         "2026-01-02",
         "order record",
     )
+    assert "ask them to confirm" in str(result["confirm_with_customer"])
     given = store.check_return_window("defect", "online", purchased_on="2026-01-10")
     assert given["purchase_date_source"] == "customer"
     assert cast(dict[str, object], given["store_exchange"])["deadline"] == "2026-02-09"
@@ -676,3 +677,5 @@ def test_order_record_never_stands_in_for_the_receipt_date(
     assert "date the product was received" in str(missing["error"])
     result = store.check_return_window("regret", "online", received_on="2026-01-15")
     assert result["deadline"] == "2026-01-22"
+    assert "purchase_date_used" not in result
+    assert "confirm_with_customer" not in result
