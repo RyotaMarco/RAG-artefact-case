@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from decimal import localcontext
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, cast
 
+import httpx2
 from huggingface_hub import (
-    InferenceClient,
     hf_hub_download,  # pyright: ignore[reportUnknownVariableType]
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -30,17 +29,14 @@ from emporio_agent.data import (
 )
 from emporio_agent.documents import PolicyChunk, PolicyIndex, PolicySection, build_index
 from emporio_agent.embeddings import (
-    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_TOKENIZER_MODEL,
     DEFAULT_TOKENIZER_REVISION,
     Embedder,
-    HFEmbedder,
     ModelTokenizer,
     TextTokenizer,
+    VoyageEmbedder,
 )
 from emporio_agent.policies import FinancialRuleSet, extract_rules
-
-if TYPE_CHECKING:
-    from huggingface_hub.inference._providers import PROVIDER_T
 
 PIPELINE_VERSION = "layout-catalog-money-v2"
 logger = logging.getLogger(__name__)
@@ -82,16 +78,16 @@ class Snapshot:
 
 def load_tokenizer(settings: Settings) -> ModelTokenizer:
     """Download the configured tokenizer, never local model weights or PyTorch."""
-    model = settings.tokenizer_model or settings.embedding.model
+    model = settings.tokenizer_model or "voyageai/" + settings.embedding.model
     revision = settings.tokenizer_revision or (
-        DEFAULT_TOKENIZER_REVISION if model == DEFAULT_EMBEDDING_MODEL else "main"
+        DEFAULT_TOKENIZER_REVISION if model == DEFAULT_TOKENIZER_MODEL else "main"
     )
     cached = hf_hub_download(
         model,
         filename="tokenizer.json",
         revision=revision,
         cache_dir=str(settings.runtime_dir / "tokenizer"),
-        token=settings.hf_token or False,
+        token=False,
     )
     return ModelTokenizer.from_file(Path(cached))
 
@@ -115,20 +111,24 @@ class StoreRuntime:
 
     def _policy_resources(self) -> None:
         """Initialize the hosted provider and local tokenizer only when PDFs need them."""
-        if self._embedder is None:
-            if not self.settings.hf_token:
-                raise ConfigurationError("HF_TOKEN is required to index the supplied PDFs.")
-            self._embedder = HFEmbedder(
-                self.settings.runtime_dir / "vectors.sqlite3",
-                client=InferenceClient(
-                    provider=cast("PROVIDER_T", self.settings.embedding.provider),
-                    token=self.settings.hf_token,
-                    timeout=self.settings.embedding_timeout_seconds,
-                ),
-                config=self.settings.embedding,
-            )
+        if self._embedder is None and not self.settings.voyage_key:
+            raise ConfigurationError("VOYAGE_API_KEY is required to index the supplied PDFs.")
         if self._tokenizer is None:
             self._tokenizer = load_tokenizer(self.settings)
+        if self._embedder is None:
+            self._embedder = VoyageEmbedder(
+                self.settings.runtime_dir / "vectors.sqlite3",
+                client=httpx2.Client(
+                    headers={"Authorization": "Bearer " + self.settings.voyage_key},
+                    timeout=self.settings.embedding_timeout_seconds,
+                    follow_redirects=False,
+                ),
+                tokenizer=self._tokenizer,
+                config=self.settings.embedding,
+                max_batch_tokens=self.settings.embedding_batch_tokens,
+                requests_per_minute=self.settings.embedding_requests_per_minute,
+                tokens_per_minute=self.settings.embedding_tokens_per_minute,
+            )
 
     def _policy_index(
         self,

@@ -103,7 +103,9 @@ jobs:
               return json.loads(result.stdout)["services"]["app"]
 
           default = resolve({})
-          assert default["environment"].get("EMBEDDING_QUERY_PREFIX") is None
+          assert default["environment"].get("EMBEDDING_BASE_URL") is None
+          assert default["environment"]["VOYAGE_API_KEY"] == ""
+          assert "HF_TOKEN" not in default["environment"]
           assert default["environment"]["DATA_DIR"] == "/app/data"
           assert default["environment"]["RUNTIME_DIR"] == "/app/runtime"
           assert default["ports"][0]["published"] == "8501"
@@ -113,27 +115,39 @@ jobs:
           assert runtime["type"] == "volume" and runtime["source"] == "runtime_data"
 
           dotenv = (
-              "EMBEDDING_MODEL=organization/plain-model\n"
-              "EMBEDDING_DIMENSIONS=384\n"
-              "EMBEDDING_QUERY_PREFIX=\n"
-              "EMBEDDING_DOCUMENT_PREFIX=passage:\\nText:\n"
+              "VOYAGE_API_KEY=fixture-voyage-key\n"
+              "EMBEDDING_MODEL=custom-voyage-model\n"
+              "EMBEDDING_BASE_URL=https://embeddings.example.test/v1\n"
+              "EMBEDDING_DIMENSIONS=512\n"
+              "EMBEDDING_REQUESTS_PER_MINUTE=6\n"
+              "EMBEDDING_TOKENS_PER_MINUTE=12000\n"
+              "EMBEDDING_BATCH_TOKENS=6000\n"
+              "EMBEDDING_TOKENIZER_MODEL=\n"
+              "EMBEDDING_TOKENIZER_REVISION=\n"
               "CHUNK_TARGET_TOKENS=256\n"
               "CHUNK_MAX_TOKENS=384\n"
               "CHUNK_OVERLAP_TOKENS=0\n"
           )
           from_file = resolve({}, dotenv)["environment"]
-          assert from_file["EMBEDDING_MODEL"] == "organization/plain-model"
-          assert from_file["EMBEDDING_DIMENSIONS"] == "384"
-          assert from_file["EMBEDDING_QUERY_PREFIX"] == ""
-          assert from_file["EMBEDDING_DOCUMENT_PREFIX"] == r"passage:\nText:"
+          assert from_file["VOYAGE_API_KEY"] == "fixture-voyage-key"
+          assert from_file["EMBEDDING_MODEL"] == "custom-voyage-model"
+          assert from_file["EMBEDDING_BASE_URL"] == "https://embeddings.example.test/v1"
+          assert from_file["EMBEDDING_DIMENSIONS"] == "512"
+          assert from_file["EMBEDDING_REQUESTS_PER_MINUTE"] == "6"
+          assert from_file["EMBEDDING_TOKENS_PER_MINUTE"] == "12000"
+          assert from_file["EMBEDDING_BATCH_TOKENS"] == "6000"
+          assert from_file["EMBEDDING_TOKENIZER_MODEL"] == ""
+          assert from_file["EMBEDDING_TOKENIZER_REVISION"] == ""
           assert from_file["CHUNK_TARGET_TOKENS"] == "256"
           assert from_file["CHUNK_MAX_TOKENS"] == "384"
           assert from_file["CHUNK_OVERLAP_TOKENS"] == "0"
           custom = resolve({
               "APP_PORT": "8601", "DATA_DIR": "./data/custom inputs",
-              "EMBEDDING_QUERY_PREFIX": r"query:\nText:",
+              "VOYAGE_API_KEY": "fixture-shell-key",
+              "EMBEDDING_BASE_URL": "https://shell.example.test/v1",
           }, dotenv)
-          assert custom["environment"]["EMBEDDING_QUERY_PREFIX"] == r"query:\nText:"
+          assert custom["environment"]["VOYAGE_API_KEY"] == "fixture-shell-key"
+          assert custom["environment"]["EMBEDDING_BASE_URL"] == "https://shell.example.test/v1"
           assert custom["environment"]["DATA_DIR"] == "/app/data"
           assert custom["environment"]["RUNTIME_DIR"] == "/app/runtime"
           assert custom["ports"][0]["published"] == "8601"

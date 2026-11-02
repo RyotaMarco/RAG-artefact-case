@@ -104,6 +104,8 @@ def _prepare_store(
             st.error(str(error))
         else:
             st.error("Store sources could not be loaded. Please check configuration and try again.")
+        if st.button("Retry loading sources"):
+            st.rerun()
         return None
     with st.sidebar.expander("Available information"):
         for name, available in snapshot.capabilities().items():

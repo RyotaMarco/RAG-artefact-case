@@ -4,14 +4,11 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from emporio_agent.documents import ChunkConfig
-from emporio_agent.embeddings import (
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_QUERY_PREFIX,
-    EmbeddingConfig,
-)
+from emporio_agent.embeddings import EmbeddingConfig
 
 
 def _nonempty(name: str, default: str) -> str:
@@ -45,21 +42,35 @@ def _positive_float(name: str, default: float) -> float:
     return value
 
 
+def _embedding_base_url(default: str) -> str:
+    """Validate the explicit HTTPS service endpoint without putting secrets in URLs."""
+    value = _nonempty("EMBEDDING_BASE_URL", default)
+    message = "EMBEDDING_BASE_URL must be an HTTPS URL without credentials, query parameters or a fragment."
+    try:
+        parsed = urlsplit(value)
+        # Reading port also rejects invalid port syntax and out-of-range values.
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError(message) from error
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(character.isspace() for character in value)
+        or "?" in value
+        or "#" in value
+    ):
+        raise ValueError(message)
+    return value.rstrip("/")
+
+
 def _embedding_settings(default: EmbeddingConfig) -> EmbeddingConfig:
-    """Read one explicit model profile, preserving intentionally empty retrieval prefixes."""
-    model = _nonempty("EMBEDDING_MODEL", default.model)
-    provider = _nonempty("EMBEDDING_PROVIDER", default.provider).casefold()
-    if provider == "auto":
-        raise ValueError("EMBEDDING_PROVIDER must select an explicit provider, not auto.")
-    query_prefix = DEFAULT_QUERY_PREFIX if model == DEFAULT_EMBEDDING_MODEL else ""
+    """Read the embedding model and its single explicit REST endpoint."""
     return EmbeddingConfig(
-        model=model,
-        provider=provider,
+        model=_nonempty("EMBEDDING_MODEL", default.model),
+        base_url=_embedding_base_url(default.base_url),
         dimensions=_integer_setting("EMBEDDING_DIMENSIONS", default.dimensions),
-        query_prefix=os.environ.get("EMBEDDING_QUERY_PREFIX", query_prefix).replace(r"\n", "\n"),
-        document_prefix=os.environ.get(
-            "EMBEDDING_DOCUMENT_PREFIX", default.document_prefix
-        ).replace(r"\n", "\n"),
     )
 
 
@@ -91,7 +102,7 @@ class Settings:
     data_dir: Path
     runtime_dir: Path
     anthropic_key: str = field(default="", repr=False)
-    hf_token: str = field(default="", repr=False)
+    voyage_key: str = field(default="", repr=False)
     model: str = "claude-haiku-5-5"
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     chunking: ChunkConfig = field(default_factory=ChunkConfig)
@@ -100,6 +111,9 @@ class Settings:
     store_timezone: str = "America/Campo_Grande"
     claude_timeout_seconds: float = 60
     embedding_timeout_seconds: float = 30
+    embedding_requests_per_minute: int = 3
+    embedding_tokens_per_minute: int = 10000
+    embedding_batch_tokens: int = 8000
     max_output_tokens: int = 2048
     max_tool_calls: int = 6
 
@@ -122,7 +136,7 @@ class Settings:
             data_dir=data,
             runtime_dir=runtime,
             anthropic_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-            hf_token=os.environ.get("HF_TOKEN", ""),
+            voyage_key=os.environ.get("VOYAGE_API_KEY", ""),
             model=_nonempty("CLAUDE_MODEL", defaults.model),
             embedding=_embedding_settings(defaults.embedding),
             chunking=_chunk_settings(defaults.chunking),
@@ -134,6 +148,15 @@ class Settings:
             ),
             embedding_timeout_seconds=_positive_float(
                 "EMBEDDING_TIMEOUT_SECONDS", defaults.embedding_timeout_seconds
+            ),
+            embedding_requests_per_minute=_integer_setting(
+                "EMBEDDING_REQUESTS_PER_MINUTE", defaults.embedding_requests_per_minute
+            ),
+            embedding_tokens_per_minute=_integer_setting(
+                "EMBEDDING_TOKENS_PER_MINUTE", defaults.embedding_tokens_per_minute
+            ),
+            embedding_batch_tokens=_integer_setting(
+                "EMBEDDING_BATCH_TOKENS", defaults.embedding_batch_tokens
             ),
             max_output_tokens=_integer_setting("CLAUDE_MAX_TOKENS", defaults.max_output_tokens),
             max_tool_calls=_integer_setting("MAX_TOOL_CALLS", defaults.max_tool_calls),
