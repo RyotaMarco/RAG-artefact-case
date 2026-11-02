@@ -58,7 +58,10 @@ class Catalog:
                 continue
             enums = {
                 column: sorted({str(row[column]) for row in table.rows if row[column] is not None})
+                # Category names are few and public; listing them lets SQL filter by the
+                # exact name ("Violões") instead of guessing a spelling.
                 for column in ("status", "payment_method", "is_active")
+                + (("name",) if name == "categories" else ())
                 if column in table.columns
             }
             result[name] = {
