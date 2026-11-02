@@ -76,7 +76,7 @@ def _missing_date(channel: str, *, defect: bool = False) -> str:
             "receipt date."
         )
     if defect:
-        return "Ask the customer for the purchase date and the receipt date."
+        return "Ask the customer for the purchase date."
     return "Ask the customer for the date the product was received."
 
 
@@ -124,10 +124,16 @@ def return_window(
             else "Perfect condition, original packaging, and the desired product available."
         )
         return result
-    if purchased is None or received is None:
+    if purchased is None:
         raise ValueError(_missing_date(channel, defect=True))
+    # Owner ruling: after the store's 30 days there is no store deadline; the store can
+    # intermediate the manufacturer's warranty, whose term is in the product certificate.
     result["store_exchange"] = _window(purchased, 30, today)
-    result["legal_warranty_intermediation"] = _window(received, 90, today)
+    result["after_store_exchange"] = (
+        "The warranty is the manufacturer's; its term is in the product's warranty "
+        "certificate (6 months to 2 years). The store can intermediate the request on "
+        "WhatsApp. Never say the warranty has expired."
+    )
     result["conditions"] = (
         "Manufacturing defects only; misuse, falls, humidity and unauthorized changes are "
         "not covered."
