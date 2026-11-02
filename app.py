@@ -46,6 +46,11 @@ def _render_sources(sources: list[dict[str, object]]) -> None:
                 seen.add(label)
 
 
+def escape_currency(text: str) -> str:
+    """Escape dollar signs: Streamlit reads a pair of $ as LaTeX, breaking R$ amounts."""
+    return text.replace("$", "\\$")
+
+
 def _render_chat(agent: Agent, tools: StoreTools, token: str) -> None:
     """Display completed messages and handle one customer question."""
     history = chat_messages(agent, token)
@@ -56,18 +61,18 @@ def _render_chat(agent: Agent, tools: StoreTools, token: str) -> None:
             )
     for message in history:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(escape_currency(message["content"]))
     question = st.chat_input("Digite sua mensagem para a loja", max_chars=8000)
     if not question:
         return
     with st.chat_message("user"):
-        st.write(question)
+        st.markdown(escape_currency(question))
     try:
         with st.status("Preparando sua resposta…", expanded=False) as status:
             answer = run_chat(agent, question)
             status.update(label="Resposta pronta", state="complete")
         with st.chat_message("assistant"):
-            st.markdown(answer)
+            st.markdown(escape_currency(answer))
             if tools.sources:
                 _render_sources(tools.sources)
     except Exception as error:
