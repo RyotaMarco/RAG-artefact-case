@@ -673,7 +673,7 @@ def test_corrupt_metadata_is_rebuilt_and_repaired(tmp_path: Path, empty_chunks: 
     """A bad persisted cache cannot block valid PDFs or remain broken across restarts."""
     settings, runtime, _, _ = _runtime(tmp_path)
     first = runtime.refresh()
-    metadata = settings.runtime_dir / f"policies-{first.generation_id}.json"
+    (metadata,) = settings.runtime_dir.glob("policies-*.json")
     if empty_chunks:
         content = cast(dict[str, object], json.loads(metadata.read_text(encoding="utf-8")))
         content["chunks"] = []
@@ -712,3 +712,21 @@ def test_updated_financial_rules_and_conflicting_pdf_never_keep_old_discount(
     resolved = runtime.refresh()
     assert not resolved.rules.conflicts
     assert resolved.rules.quote(Decimal("100.00")).total == Decimal("91.00")
+
+
+def test_rulings_change_the_snapshot_without_rebuilding_the_index(tmp_path: Path) -> None:
+    """Editing the business rulings republishes rules but reuses the cached policy index."""
+    settings, runtime, _, _ = _runtime(tmp_path)
+    first = runtime.refresh()
+    assert first.rulings is None
+    rulings = Path(__file__).parents[1] / "data" / "store_rulings.yaml"
+    (settings.data_dir / "store_rulings.yaml").write_bytes(rulings.read_bytes())
+    tokenizer = CountingTokenizer()
+    second = StoreRuntime(settings, embedder=RecordingEmbedder(), tokenizer=tokenizer).refresh()
+    assert second.generation_id != first.generation_id
+    assert second.rulings is not None
+    assert second.rulings.complaints.max_per_conversation == 3
+    assert tokenizer.calls == 0
+    (settings.data_dir / "store_rulings.yaml").write_text("shipping: [", encoding="utf-8")
+    with pytest.raises(ValueError, match="store_rulings.yaml is invalid"):
+        runtime.refresh()
