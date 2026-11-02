@@ -643,3 +643,36 @@ def test_online_withdrawal_needs_only_the_receipt_date(manual: Snapshot, tmp_pat
     missing = store.check_return_window("regret", "online")
     assert "date the product was received" in str(missing["error"])
     assert "purchase date" not in str(missing["error"])
+
+
+def test_verified_order_supplies_the_purchase_date_when_not_given(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """Order 501 was placed on 2026-01-02: a defect window counts from it without asking."""
+    store = tools(order_snapshot(manual, 10000), tmp_path)
+    store.now = lambda: datetime(2026, 1, 20, 10, 0, tzinfo=CAMPO_GRANDE)
+    assert "purchase date" in str(store.check_return_window("defect", "online")["error"])
+    assert store.verify_order(501, "alex@example.test")["verified"] is True
+    result = store.check_return_window("defect", "online")
+    window = cast(dict[str, object], result["store_exchange"])
+    assert window["deadline"] == "2026-02-01"
+    assert (result["purchase_date_used"], result["purchase_date_source"]) == (
+        "2026-01-02",
+        "order record",
+    )
+    given = store.check_return_window("defect", "online", purchased_on="2026-01-10")
+    assert given["purchase_date_source"] == "customer"
+    assert cast(dict[str, object], given["store_exchange"])["deadline"] == "2026-02-09"
+
+
+def test_order_record_never_stands_in_for_the_receipt_date(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """An online withdrawal still asks when the product was received, even for a verified order."""
+    store = tools(order_snapshot(manual, 10000), tmp_path)
+    store.now = lambda: datetime(2026, 1, 20, 10, 0, tzinfo=CAMPO_GRANDE)
+    assert store.verify_order(501, "alex@example.test")["verified"] is True
+    missing = store.check_return_window("regret", "online")
+    assert "date the product was received" in str(missing["error"])
+    result = store.check_return_window("regret", "online", received_on="2026-01-15")
+    assert result["deadline"] == "2026-01-22"

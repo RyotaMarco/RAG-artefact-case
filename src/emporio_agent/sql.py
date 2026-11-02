@@ -438,6 +438,17 @@ class QueryEngine:
         name = customer.get("name") if customer is not None else None
         return name.split()[0] if isinstance(name, str) and name.split() else None
 
+    def order_date(self, verified_order_id: int) -> str | None:
+        """Return the purchase date recorded for a verified order, as YYYY-MM-DD."""
+        orders = self.catalog.tables.get("orders")
+        if orders is None:
+            return None
+        value = next(
+            (row.get("order_date") for row in orders.rows if row["order_id"] == verified_order_id),
+            None,
+        )
+        return value if isinstance(value, str) and value.strip() else None
+
     def order_email(self, verified_order_id: int) -> str | None:
         """Return the email of a verified order's customer, for staff follow-up only."""
         customer = self._order_customer(verified_order_id)
