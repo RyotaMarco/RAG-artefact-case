@@ -178,7 +178,6 @@ TODAY = date(2026, 11, 20)
         ("regret", "online", "2026-11-01", "2026-11-13", None, "2026-11-20", True),
         ("regret", "online", "2026-11-01", "2026-11-12", None, "2026-11-19", False),
         ("preference", "online", "2026-11-01", "2026-11-13", None, "2026-11-20", True),
-        ("preference", "store", "2026-11-13", None, None, "2026-11-20", True),
         ("defect", "online", "2026-10-21", "2026-10-25", "store_exchange", "2026-11-20", True),
         ("defect", "online", "2026-10-20", "2026-10-25", "store_exchange", "2026-11-19", False),
         ("defect", "online", "2026-10-21", None, "store_exchange", "2026-11-20", True),
@@ -207,7 +206,6 @@ def test_return_windows_count_calendar_days_inclusively(
         ("regret", "online", "2026-11-01", None, "date the product was received"),
         ("preference", "online", "2026-11-01", None, "date the product was received"),
         ("defect", "online", None, "2026-11-01", "Ask the customer for the purchase date"),
-        ("preference", "store", None, None, "in-store purchases have no separate receipt date"),
         ("defect", "store", None, None, "in-store purchases have no separate receipt date"),
         ("regret", "phone", "2026-11-01", "2026-11-02", "online or in the physical store"),
         ("refund", "online", "2026-11-01", "2026-11-02", "regret, preference or defect"),
@@ -225,10 +223,11 @@ def test_return_window_asks_for_missing_or_invalid_customer_dates(
 
 
 def test_store_purchases_have_no_withdrawal_right() -> None:
-    """In-store regret points to the preference exchange instead of a deadline."""
+    """In-store regret is referred to WhatsApp, without a deadline or an offer."""
     result = return_window("regret", "store", "2026-11-18", None, TODAY)
     assert result["applicable"] is False
-    assert "preference exchange" in str(result["explanation"])
+    assert "Refer the customer to WhatsApp" in str(result["explanation"])
+    assert "do not offer an exchange" in str(result["explanation"])
     assert "deadline" not in result
 
 
@@ -543,3 +542,25 @@ def test_defect_after_thirty_days_goes_to_manufacturer_intermediation() -> None:
     assert "intermediate" in note
     assert "Never say the warranty has expired" in note
     assert "legal_warranty_intermediation" not in result
+
+
+def test_online_regret_states_every_condition_of_section_4_1() -> None:
+    """Packaging, refund method and term, return shipping and the WhatsApp channel."""
+    result = return_window("regret", "online", "2026-11-01", "2026-11-13", TODAY)
+    conditions = str(result["conditions"])
+    for part in (
+        "Original packaging",
+        "original payment method within 10 business days",
+        "store pays the return shipping",
+        "WhatsApp",
+    ):
+        assert part in conditions
+
+
+@pytest.mark.parametrize("purchased", ["2026-11-18", None])
+def test_in_store_preference_exchange_is_referred_to_whatsapp(purchased: str | None) -> None:
+    """In-store preference exchanges get no deadline or promise, only the WhatsApp referral."""
+    result = return_window("preference", "store", purchased, None, TODAY)
+    assert result["applicable"] is False
+    assert "Refer the customer to WhatsApp" in str(result["explanation"])
+    assert "deadline" not in result
