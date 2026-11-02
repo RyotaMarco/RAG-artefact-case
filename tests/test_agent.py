@@ -498,3 +498,16 @@ def test_verification_returns_only_the_first_name_of_the_order_owner(tmp_path: P
         assert "customer_first_name" not in failed
         assert "Bea" not in str(failed)
         assert "Fixture" not in str(tools.verify_order(501, "alex@example.test"))
+
+
+def test_prompt_greets_once_and_asks_only_for_the_missing_return_date(tmp_path: Path) -> None:
+    """A repeated greeting or a request for unneeded dates came from the instructions."""
+    with _agent(
+        _settings(tmp_path), small_snapshot(), conversation_token(), [text_response("Ok.")]
+    ) as (agent, _, stub):
+        run_chat(agent, "Oi")
+        system = " ".join(str(stub.requests[0]["system"]).replace("\\n", " ").split())
+    assert "Greet at most once per conversation" in system
+    assert "ask only for that one" in system
+    assert "never mention order records" in system
+    assert "the purchase date and the date the product was received, then call" not in system
