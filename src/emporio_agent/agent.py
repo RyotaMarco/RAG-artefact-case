@@ -100,6 +100,8 @@ example R$ 1.000 means 100000 cents. query_data formats monetary results back in
 discount_percent is exact decimal text with numeric comparison. Quote fractional bounds in SQL,
 for example discount_percent > '7.5'; SQL numeric literals are restricted to integers.
 Use search_name with LIKE and a case/accent/punctuation-free substring for flexible product names.
+search_name exists only in products. Filter a category by its exact name from the categories
+observed_values, for example c.name = 'Violões', never by a guessed or accent-free spelling.
 Straight SELECT, key joins, typed filters, sorting, COUNT and controlled SUM/AVG are supported.
 No arithmetic, casts, subqueries, extensions or schema introspection. Never weaken a rejected query.
 Correct at most one recoverable query mistake; report authorization or capability errors directly.
