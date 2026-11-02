@@ -129,7 +129,7 @@ def test_percentage_aggregate_wrappers_preserve_money_units_and_values() -> None
     )
     assert result.rows == ((1001, "5"),)
     assert result.money_indexes == (0,)
-    assert result.as_dict()["rows"] == [["BRL 10.01", "5"]]
+    assert result.as_dict()["rows"] == [["R$ 10,01", "5"]]
 
 
 @pytest.mark.parametrize(
@@ -259,14 +259,14 @@ def test_all_null_left_join_money_aggregates_remain_sql_null() -> None:
         "GROUP BY c.category_id ORDER BY c.category_id"
     )
     assert result.rows == ((1, 3003, 1502), (2, None, None))
-    assert result.as_dict()["rows"] == [[1, "BRL 30.03", "BRL 15.02"], [2, None, None]]
+    assert result.as_dict()["rows"] == [[1, "R$ 30,03", "R$ 15,02"], [2, None, None]]
 
 
 def test_catalog_query_has_exact_money_and_provenance() -> None:
-    """Return ready-to-use BRL display values without asking an LLM to divide cents."""
+    """Return ready-to-use R$ display values without asking an LLM to divide cents."""
     result = _engine().query("SELECT name, price_cents FROM products WHERE product_id = 95")
     assert result.rows[0][1] == 219900
-    assert result.as_dict()["rows"] == [["Takamine GD20 Dreadnought Natural", "BRL 2,199.00"]]
+    assert result.as_dict()["rows"] == [["Takamine GD20 Dreadnought Natural", "R$ 2.199,00"]]
     assert result.money_indexes == (1,)
     assert result.source_paths
 

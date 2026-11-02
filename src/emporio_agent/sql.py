@@ -418,6 +418,26 @@ class QueryEngine:
             else None
         )
 
+    def customer_first_name(self, verified_order_id: int) -> str | None:
+        """Return only the first name of a verified order's customer, for greetings."""
+        orders = self.catalog.tables.get("orders")
+        customers = self.catalog.tables.get("customers")
+        if orders is None or customers is None or "name" not in customers.columns:
+            return None
+        owner = next(
+            (row["customer_id"] for row in orders.rows if row["order_id"] == verified_order_id),
+            None,
+        )
+        name = next(
+            (
+                row["name"]
+                for row in customers.rows
+                if owner is not None and row["customer_id"] == owner
+            ),
+            None,
+        )
+        return name.split()[0] if isinstance(name, str) and name.split() else None
+
     def _scope(self, verified_order_id: int | None) -> dict[str, Table]:
         scoped = {name: table for name, table in self.catalog.tables.items() if name in _PUBLIC}
         if verified_order_id is not None:

@@ -122,7 +122,7 @@ def test_multiple_active_promotions_require_unambiguous_discount(
         assert "Staff must confirm" in str(result["error"])
         assert "total" not in result
     else:
-        assert result["total"] == "BRL 90.00"
+        assert result["total"] == "R$ 90,00"
         assert result["policy_note"] == "PIX discount does not stack with a promotional price."
 
 
@@ -230,12 +230,15 @@ def test_native_tool_loop_and_sdk_configuration(tmp_path: Path, model_id: str) -
         assert first["thinking"] == {"type": "adaptive"}
         assert first["output_config"] == {"effort": "low"}
         assert all(name not in first for name in ("temperature", "top_p", "top_k"))
-        assert "English" in str(first["system"])
+        system = " ".join(str(first["system"]).replace("\\n", " ").split())
+        assert "use Brazilian Portuguese" in system
+        assert "Always answer in English" not in system
+        assert "never claim to be a human attendant" in system
         assert "cache_control" in str(first["system"])
         assert "cache_control" in str(first["tools"])
         assert latest_user_text(first) == "Quanto custa o violão?"
         result = tool_results(stub.requests[1])[0]
-        assert _rows(result) == [["Demo Guitar", "BRL 100.01"]]
+        assert _rows(result) == [["Demo Guitar", "R$ 100,01"]]
         assert "fixture-signature" in str(stub.requests[1]["messages"])
         assert tools.sources == [{"file": "instruments.csv"}]
         model = agent.model
@@ -249,9 +252,9 @@ def test_native_tool_loop_and_sdk_configuration(tmp_path: Path, model_id: str) -
 @pytest.mark.parametrize(
     ("price", "pix_rate", "promotion", "method", "count", "total", "amounts"),
     [
-        (10001, "7", None, "credit", 6, "BRL 100.01", ["BRL 16.67"] * 5 + ["BRL 16.66"]),
-        (17777, "11", None, "pix", 1, "BRL 158.22", ["BRL 158.22"]),
-        (10001, "7", "17", "pix", 1, "BRL 83.01", ["BRL 83.01"]),
+        (10001, "7", None, "credit", 6, "R$ 100,01", ["R$ 16,67"] * 5 + ["R$ 16,66"]),
+        (17777, "11", None, "pix", 1, "R$ 158,22", ["R$ 158,22"]),
+        (10001, "7", "17", "pix", 1, "R$ 83,01", ["R$ 83,01"]),
     ],
 )
 def test_quote_uses_current_rules_and_exact_cent_allocation(
@@ -288,8 +291,9 @@ def test_quote_uses_current_rules_and_exact_cent_allocation(
         assert result["installment_amounts"] == amounts
         assert "approximate" not in str(result)
         assert sum(
-            Decimal(value.removeprefix("BRL ").replace(",", "")) for value in amounts
-        ) == Decimal(total.removeprefix("BRL ").replace(",", ""))
+            Decimal(value.removeprefix("R$ ").replace(".", "").replace(",", "."))
+            for value in amounts
+        ) == Decimal(total.removeprefix("R$ ").replace(".", "").replace(",", "."))
         assert "payment-policy.pdf" in str(result["sources"])
 
 
@@ -316,7 +320,7 @@ def test_verified_order_scope_is_enforced_and_failed_verification_clears_it(tmp_
     ) as (agent, tools, stub):
         run_chat(agent, "Check order 501, alex@example.test.")
         results = tool_results(stub.requests[-1])
-        assert results[0] == {"verified": True, "order_id": 501}
+        assert results[0] == {"verified": True, "order_id": 501, "customer_first_name": "Alex"}
         assert _rows(results[1]) == [[501, "shipped"]]
         assert tools.access.verified_order() == 501
         assert "Private Bea note" not in str(results)
@@ -429,7 +433,7 @@ def test_resumed_price_question_uses_fresh_tool_evidence(tmp_path: Path) -> None
     ) as (agent, _, stub):
         assert "BRL 100.01" in str(_additional_input(agent))
         assert run_chat(agent, "What is its price now?") == "The current price is BRL 200.02."
-        assert _rows(tool_results(stub.requests[-1])[0]) == [["BRL 200.02"]]
+        assert _rows(tool_results(stub.requests[-1])[0]) == [["R$ 200,02"]]
         assert "Before repeating an earlier price" in str(stub.requests[0]["system"])
 
 
@@ -479,3 +483,17 @@ def test_store_fact_tools_reach_the_model_with_matching_instructions(tmp_path: P
     for name in names:
         assert name in str(request["system"]), name
     assert "[contato interno omitido]" in str(request["system"])
+
+
+def test_verification_returns_only_the_first_name_of_the_order_owner(tmp_path: Path) -> None:
+    """A successful check exposes the first name for greetings; failures expose nothing."""
+    with _agent(_settings(tmp_path), small_snapshot(), conversation_token(), []) as (_, tools, _):
+        assert tools.verify_order(501, "alex@example.test") == {
+            "verified": True,
+            "order_id": 501,
+            "customer_first_name": "Alex",
+        }
+        failed = tools.verify_order(502, "alex@example.test")
+        assert "customer_first_name" not in failed
+        assert "Bea" not in str(failed)
+        assert "Fixture" not in str(tools.verify_order(501, "alex@example.test"))
