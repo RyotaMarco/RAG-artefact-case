@@ -25,7 +25,7 @@ from emporio_agent.money import check_cents, discounted_cents, format_brl, split
 from emporio_agent.policies import PolicyUnavailableError
 from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine, QueryError
-from emporio_agent.store_facts import TOPICS, StoreFacts
+from emporio_agent.store_facts import TOPICS, StoreFacts, opening_status
 
 INSTRUCTIONS = """
 You are the customer support assistant for the musical instrument store described in the sources.
@@ -156,10 +156,16 @@ class ConversationAccess:
 class StoreTools:
     """Bind each tool call to one source snapshot and one private order scope."""
 
-    def __init__(self, snapshot: Snapshot, access: ConversationAccess) -> None:
+    def __init__(
+        self,
+        snapshot: Snapshot,
+        access: ConversationAccess,
+        timezone: str = "America/Campo_Grande",
+    ) -> None:
         """Retain references and query failures only within the current agent run."""
         self.snapshot = snapshot
         self.access = access
+        self.timezone = ZoneInfo(timezone)
         self.engine = QueryEngine(snapshot.catalog)
         self.facts = StoreFacts(snapshot.policies.sections if snapshot.policies else ())
         self.sources: list[dict[str, object]] = []
@@ -206,6 +212,27 @@ class StoreTools:
             }
         self.sources.extend(_citations(self.facts.citations(*self.facts.keys(topic))))
         return {"facts": facts}
+
+    def now(self) -> datetime:
+        """Return the current store-local time; tests replace this clock."""
+        return datetime.now(self.timezone)
+
+    def store_open_now(self) -> dict[str, object]:
+        """Check the regular opening hours against the current store-local time.
+
+        Returns:
+            Whether the store is open by regular hours, today's hours, the next opening and a
+            holiday warning, or an error when the manual does not confirm the hours.
+        """
+        if not self.facts.has("hours"):
+            return {
+                "error": "The active manual does not confirm opening hours. Refer the customer "
+                "to staff."
+            }
+        self.sources.extend(_citations(self.facts.citations("hours")))
+        status = opening_status(self.now())
+        status["whatsapp"] = self.facts.whatsapp
+        return status
 
     def verify_order(self, order_id: int, email: str) -> dict[str, object]:
         """Verify one order/contact pair before private order queries.
@@ -346,7 +373,7 @@ def build_agent(
         raise ValueError("The conversation identifier is invalid.")
     database = settings.runtime_dir / "sessions.sqlite3"
     access = ConversationAccess(database, token, snapshot.generation_id)
-    tools = StoreTools(snapshot, access)
+    tools = StoreTools(snapshot, access, settings.store_timezone)
     http_client = httpx2.Client(transport=transport, timeout=settings.claude_timeout_seconds)
     model = Claude(
         id=settings.model,
@@ -369,6 +396,7 @@ def build_agent(
         add_history_to_context=False,
         tools=[
             tools.store_facts,
+            tools.store_open_now,
             tools.search_policies,
             tools.verify_order,
             tools.query_data,

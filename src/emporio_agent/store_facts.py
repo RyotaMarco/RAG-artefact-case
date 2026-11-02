@@ -3,6 +3,7 @@
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta
 
 from emporio_agent.documents import Citation, PolicySection
 
@@ -314,3 +315,38 @@ class StoreFacts:
             return match.group(0) if match.group(0) == self.email else MASK
 
         return _EMAIL.sub(emails, _PHONE.sub(phones, text))
+
+
+# Regular hours from manual section 2, used only while the "hours" fact is confirmed.
+WEEKLY_HOURS = {day: (time(9), time(18)) for day in range(5)} | {5: (time(9), time(13))}
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def opening_status(now: datetime) -> dict[str, object]:
+    """Apply the regular weekly schedule to a store-local time, without holiday knowledge."""
+    hours = WEEKLY_HOURS.get(now.weekday())
+    is_open = hours is not None and hours[0] <= now.time() < hours[1]
+    following = now
+    while True:
+        slot = WEEKLY_HOURS.get(following.weekday())
+        start = (
+            following.replace(hour=slot[0].hour, minute=0, second=0, microsecond=0)
+            if slot is not None
+            else None
+        )
+        if start is not None and start > now:
+            break
+        following = (following + timedelta(days=1)).replace(hour=0, minute=0)
+    status: dict[str, object] = {
+        "store_local_time": now.isoformat(timespec="minutes"),
+        "weekday": _WEEKDAYS[now.weekday()],
+        "open_by_regular_hours": is_open,
+        "today": f"{hours[0]:%H:%M}-{hours[1]:%H:%M}" if hours is not None else "closed",
+        "next_opening": f"{_WEEKDAYS[following.weekday()]} {start:%Y-%m-%d %H:%M}",
+        "warning": "Holidays and special dates are not known here: the store closes on "
+        "holidays and may extend hours on special dates. Ask the customer to confirm on "
+        "WhatsApp.",
+    }
+    if is_open and hours is not None:
+        status["closes_at"] = f"{hours[1]:%H:%M}"
+    return status

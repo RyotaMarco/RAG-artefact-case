@@ -2,7 +2,9 @@
 
 import re
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from agent_fixtures import manual_snapshot, small_snapshot
@@ -10,7 +12,7 @@ from agent_fixtures import manual_snapshot, small_snapshot
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import PolicySection
 from emporio_agent.runtime import Snapshot
-from emporio_agent.store_facts import FACTS, MASK, TOPICS, StoreFacts
+from emporio_agent.store_facts import FACTS, MASK, TOPICS, StoreFacts, opening_status
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -123,3 +125,52 @@ def test_mask_hides_every_contact_when_the_manual_confirms_none() -> None:
     facts = StoreFacts(())
     text = "Ligue (11) 2345-6789 ou 11 98765-4321, escreva para a@b.com.br. CEP 79202-333."
     assert facts.mask(text) == f"Ligue {MASK} ou {MASK}, escreva para {MASK}. CEP 79202-333."
+
+
+CAMPO_GRANDE = ZoneInfo("America/Campo_Grande")
+
+
+@pytest.mark.parametrize(
+    ("local", "is_open", "today", "next_opening"),
+    [
+        ("2026-11-02 08:59", False, "09:00-18:00", "Monday 2026-11-02 09:00"),
+        ("2026-11-02 09:00", True, "09:00-18:00", "Tuesday 2026-11-03 09:00"),
+        ("2026-11-06 17:59", True, "09:00-18:00", "Saturday 2026-11-07 09:00"),
+        ("2026-11-06 18:00", False, "09:00-18:00", "Saturday 2026-11-07 09:00"),
+        ("2026-11-07 12:59", True, "09:00-13:00", "Monday 2026-11-09 09:00"),
+        ("2026-11-07 13:00", False, "09:00-13:00", "Monday 2026-11-09 09:00"),
+        ("2026-11-08 10:00", False, "closed", "Monday 2026-11-09 09:00"),
+    ],
+)
+def test_opening_status_follows_regular_hours_at_the_boundaries(
+    local: str, is_open: bool, today: str, next_opening: str
+) -> None:
+    """Opening is inclusive and closing exclusive; Sundays are closed."""
+    status = opening_status(datetime.fromisoformat(local).replace(tzinfo=CAMPO_GRANDE))
+    assert status["open_by_regular_hours"] is is_open
+    assert status["today"] == today
+    assert status["next_opening"] == next_opening
+    assert ("closes_at" in status) is is_open
+    assert "Holidays" in str(status["warning"])
+
+
+def test_open_now_tool_uses_store_time_and_never_claims_holiday_knowledge(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """A national holiday on a weekday still reports regular hours with the warning."""
+    store = tools(manual, tmp_path)
+    store.now = lambda: datetime(2026, 11, 20, 10, 0, tzinfo=CAMPO_GRANDE)
+    status = store.store_open_now()
+    assert status["open_by_regular_hours"] is True
+    assert status["whatsapp"] == "(67) 3321-4500"
+    assert "not known" in str(status["warning"])
+    assert any(source["section"] == "2. Horário de Funcionamento" for source in store.sources)
+    assert "error" in tools(small_snapshot(), tmp_path / "other").store_open_now()
+
+
+def test_store_tools_default_clock_uses_the_configured_timezone(
+    manual: Snapshot, tmp_path: Path
+) -> None:
+    """The real clock is timezone-aware in the configured store zone."""
+    access = ConversationAccess(tmp_path / "s.sqlite3", conversation_token(), "generation")
+    assert StoreTools(manual, access, "America/Campo_Grande").now().tzinfo == CAMPO_GRANDE
