@@ -35,7 +35,7 @@ from emporio_agent.runtime import Snapshot
 from emporio_agent.sql import QueryEngine, QueryError
 from emporio_agent.store_rules import (
     RETURN_REASONS,
-    SPLIT_METHODS,
+    ReturnTerms,
     metro_shipping_cents,
     opening_status,
     return_window,
@@ -102,8 +102,8 @@ yourself. The tool checks current stock, active promotions,
 source payment conditions, ambiguity and exact rounding. Show both original and promotional price
 when relevant. A quote is informational, not a purchase. If a payment rule is unsupported, cite the
 policy and refer the customer to staff. Never invent minimum installments or discount percentages.
-calculate_quote also reports Campo Grande metropolitan shipping on the final amount paid; present
-it only after confirming the delivery region. Other cities depend on the CEP and staff quote them.
+calculate_quote also reports Campo Grande metropolitan shipping, on the basis its note states;
+present it only after confirming the delivery region. Other cities depend on the CEP and staff quote them.
 
 Before repeating an earlier price, promotion, stock or status, consult the current tools again.
 Earlier interest in an instrument does not mean the customer placed an order. A returning greeting
@@ -245,7 +245,7 @@ class StoreTools:
                 "to staff."
             }
         self.sources.extend(_citations(self.evidence.citations("hours")))
-        status = opening_status(self.now())
+        status = opening_status(self.now(), self.evidence.values.weekly_hours or {})
         status["whatsapp"] = self.evidence.whatsapp
         return status
 
@@ -268,13 +268,20 @@ class StoreTools:
         Returns:
             Deadlines and whether each window is still open, or what to ask for. Not an approval.
         """
-        if reason not in RETURN_REASONS or not self.evidence.has(reason):
+        terms = self._return_terms()
+        if (
+            reason not in RETURN_REASONS
+            or not self.evidence.has(reason)
+            or (reason == "preference" and self.snapshot.rulings is None)
+        ):
             return {
                 "error": "The active manual does not confirm this rule. Refer the customer to "
                 "staff."
             }
         try:
-            result = return_window(reason, channel, purchased_on, received_on, self.now().date())
+            result = return_window(
+                reason, channel, purchased_on, received_on, self.now().date(), terms
+            )
         except ValueError as error:
             return {"error": str(error)}
         keys = (reason, "not_exchangeable") if reason != "defect" else (reason,)
@@ -283,6 +290,22 @@ class StoreTools:
             f"Informational only, not an approval. Staff confirm on WhatsApp {self.evidence.whatsapp}."
         )
         return result
+
+    def _return_terms(self) -> ReturnTerms:
+        """Combine manual deadlines with the store's exchange rulings.
+
+        Missing values default to zero or empty; has(reason) blocks any rule that needs them.
+        """
+        values, rulings = self.evidence.values, self.snapshot.rulings
+        return ReturnTerms(
+            regret_days=values.regret_days or 0,
+            refund_business_days=values.refund_business_days or 0,
+            preference_days=values.preference_days or 0,
+            defect_days=values.defect_days or 0,
+            manufacturer_warranty=values.manufacturer_warranty or "",
+            preference_counts_from=rulings.returns.preference_counts_from if rulings else "",
+            in_store_preference=rulings.returns.in_store_preference if rulings else "",
+        )
 
     def register_complaint(self, summary: str) -> dict[str, object]:
         """Record a complaint about the verified order for staff follow-up.
@@ -293,7 +316,8 @@ class StoreTools:
         Returns:
             The protocol, the response time and the WhatsApp message to send, or an error.
         """
-        if not self.evidence.has("complaints") or self.evidence.whatsapp is None:
+        rulings = self.snapshot.rulings
+        if not self.evidence.has("complaints") or self.evidence.whatsapp is None or rulings is None:
             return {
                 "error": "The active manual does not confirm the complaint process. Refer the "
                 "customer to staff."
@@ -312,7 +336,10 @@ class StoreTools:
                 order_id,
                 summary,
                 self.now(),
-                email=self.engine.order_email(order_id),
+                limit=rulings.complaints.max_per_conversation,
+                email=self.engine.order_email(order_id)
+                if rulings.complaints.keep_order_email
+                else None,
             )
         except ValueError as error:
             return {"error": str(error)}
@@ -320,7 +347,7 @@ class StoreTools:
         return {
             "protocol": protocol,
             "order_id": order_id,
-            "response_time": "Up to 24 business hours.",
+            "response_time": f"Up to {self.evidence.values.complaint_hours} business hours.",
             "whatsapp": self.evidence.whatsapp,
             "whatsapp_message": f"Olá! Tenho uma reclamação registrada com o protocolo {protocol}.",
         }
@@ -440,20 +467,33 @@ class StoreTools:
         self.sources.extend({"file": path} for path in tables["promotions"].source_paths)
         return lines, original_total, regular, promoted
 
-    def _metro_shipping(self, total: int) -> dict[str, object]:
-        """Report the metropolitan fee on the final amount paid, when the manual confirms it."""
-        if not self.evidence.has("metro_shipping"):
+    def _metro_shipping(self, total: int, catalog_total: int) -> dict[str, object]:
+        """Report the metropolitan fee from the manual's values and the store's rulings."""
+        values, rulings = self.evidence.values, self.snapshot.rulings
+        if (
+            not self.evidence.has("metro_shipping")
+            or rulings is None
+            or values.metro_threshold_cents is None
+            or values.metro_fee_cents is None
+        ):
             return {
                 "shipping_note": "Shipping rules are not confirmed by the active manual. Staff "
                 "quote shipping."
             }
-        fee = metro_shipping_cents(total)
+        on_final = rulings.shipping.threshold_on_final_amount
+        fee = metro_shipping_cents(
+            total if on_final else catalog_total,
+            threshold_cents=values.metro_threshold_cents,
+            fee_cents=values.metro_fee_cents,
+            free_at_threshold=rulings.shipping.free_at_exact_threshold,
+        )
         self.sources.extend(_citations(self.evidence.citations("metro_shipping")))
         return {
             "metro_region_shipping": format_brl(fee),
             "total_with_metro_shipping": format_brl(check_cents(total + fee)),
-            "shipping_note": "Campo Grande metropolitan region only, based on the final amount "
-            "paid for the whole order. Other cities depend on the destination CEP; staff quote "
+            "shipping_note": "Campo Grande metropolitan region only, based on the "
+            f"{'final amount paid' if on_final else 'catalog total'} for the whole order. "
+            "Other cities depend on the destination CEP; staff quote "
             f"it on WhatsApp {self.evidence.whatsapp}.",
         }
 
@@ -499,7 +539,7 @@ class StoreTools:
                 tuple(dict.fromkeys(c for quote in quotes for c in quote.citations))
             )
             self.sources.extend(references)
-            shipping = self._metro_shipping(total)
+            shipping = self._metro_shipping(total, catalog_total)
             notes = " ".join(dict.fromkeys(quote.note for quote in quotes if quote.note))
             return {
                 "items": lines,
@@ -522,7 +562,7 @@ class StoreTools:
     ) -> tuple[dict[str, object], tuple[Citation, ...]]:
         """Validate one part of a combined payment against the manual's payment rules."""
         rules = self.snapshot.rules
-        if (method == "debit" and "debit" not in rules.single_payment_methods) or (
+        if (method in {"debit", "boleto"} and method not in rules.single_payment_methods) or (
             method == "pix" and rules.pix_rate is None
         ):
             raise PolicyUnavailableError(
@@ -582,10 +622,19 @@ class StoreTools:
                     "The active manual does not confirm combined payments. Refer to staff."
                 )
             methods = [normalize_method(name) for name in (first_method, second_method)]
-            if not set(methods) <= set(SPLIT_METHODS) or methods[0] == methods[1]:
+            if self.snapshot.rulings is None:
+                raise PolicyUnavailableError(
+                    "The store's combined-payment rulings are unavailable. Refer to staff."
+                )
+            allowed = self.snapshot.rulings.combined_payment.methods
+            if not set(methods) <= set(allowed) or methods[0] == methods[1]:
+                boleto = (
+                    ""
+                    if "boleto" in allowed
+                    else (" Boleto takes up to 3 business days to clear and is not combined.")
+                )
                 raise ValueError(
-                    "Combine two different methods among PIX, credit and debit. Boleto takes up "
-                    "to 3 business days to clear and is not combined."
+                    f"Combine two different methods among {', '.join(allowed)}.{boleto}"
                 )
             lines, original_total, regular, promoted = self._order_totals(items)
             total = check_cents(regular + promoted)
@@ -618,7 +667,7 @@ class StoreTools:
                 "sources": references,
                 "note": "Combined payments use catalog prices without the PIX discount. These "
                 "values must be confirmed when finalizing the purchase. This is not a purchase.",
-                **self._metro_shipping(total),
+                **self._metro_shipping(total, total),
             }
         except (ValueError, ArithmeticError) as error:
             return {"error": str(error)}

@@ -39,6 +39,7 @@ from emporio_agent.embeddings import (
 )
 from emporio_agent.policies import FinancialRuleSet, extract_rules
 from emporio_agent.policy_evidence import PolicyEvidence
+from emporio_agent.rulings import StoreRulings, load_rulings
 
 PIPELINE_VERSION = "layout-catalog-money-v2"
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class Snapshot:
     catalog: Catalog
     policies: PolicyIndex | None
     rules: FinancialRuleSet
+    rulings: StoreRulings | None = None
 
     @cached_property
     def evidence(self) -> PolicyEvidence:
@@ -223,18 +225,21 @@ class StoreRuntime:
                 else "no-tokenizer",
                 self.settings.chunking.fingerprint if pdfs else "no-chunks",
             )
-            generation = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            index_generation = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            # Business rulings change the snapshot, never the cached policy index.
+            rulings, rulings_id = load_rulings(self.settings.data_dir)
+            generation = hashlib.sha256(f"{index_generation}:{rulings_id}".encode()).hexdigest()
             if self._current is not None and self._current.generation_id == generation:
                 return self._current
             catalog = build_catalog(sources)
             index: PolicyIndex | None = None
             if pdfs:
                 assert self._embedder is not None and self._tokenizer is not None
-                index = self._policy_index(pdfs, generation, self._embedder, self._tokenizer)
+                index = self._policy_index(pdfs, index_generation, self._embedder, self._tokenizer)
             with localcontext() as context:
                 context.prec = 120
                 rules = extract_rules(index.sections if index is not None else ())
-            snapshot = Snapshot(generation, catalog, index, rules)
+            snapshot = Snapshot(generation, catalog, index, rules, rulings)
             self._publish(snapshot, source_id)
             self._prune_legacy_catalogs()
             return snapshot

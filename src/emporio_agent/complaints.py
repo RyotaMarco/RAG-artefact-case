@@ -9,7 +9,6 @@ from pathlib import Path
 from emporio_agent.contacts import CPF, PHONE
 
 PROTOCOL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-MAX_PER_CONVERSATION = 3
 # Owner ruling: emails may be kept; phones and CPFs typed by the customer are removed.
 REDACTED = "[dado pessoal omitido]"
 
@@ -27,6 +26,7 @@ def record_complaint(
     summary: str,
     now: datetime,
     *,
+    limit: int,
     email: str | None = None,
 ) -> str:
     """Store a redacted summary with the verified order's email and return its protocol.
@@ -51,7 +51,7 @@ def record_complaint(
         (count,) = connection.execute(
             "SELECT COUNT(*) FROM complaints WHERE conversation = ?", (conversation,)
         ).fetchone()
-        if count >= MAX_PER_CONVERSATION:
+        if count >= limit:
             raise ValueError(
                 "This conversation already registered the maximum number of complaints."
             )

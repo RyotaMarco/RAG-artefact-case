@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -14,7 +14,16 @@ from emporio_agent.agent import ConversationAccess, StoreTools, conversation_tok
 from emporio_agent.documents import PolicyIndex, PolicySection
 from emporio_agent.policy_evidence import MASK, RULE_EVIDENCE, PolicyEvidence
 from emporio_agent.runtime import Snapshot
-from emporio_agent.store_rules import metro_shipping_cents, opening_status, return_window
+from emporio_agent.store_rules import (
+    ReturnTerms,
+    metro_shipping_cents,
+    opening_status,
+    return_window,
+)
+
+# The manual's values as of this PDF; test_manual_values_match_the_delivered_pdf ties them.
+HOURS = {day: (time(9), time(18)) for day in range(5)} | {5: (time(9), time(13))}
+TERMS = ReturnTerms(7, 10, 7, 30, "6 meses a 2 anos", "receipt", "whatsapp")
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -139,7 +148,7 @@ def test_opening_status_follows_regular_hours_at_the_boundaries(
     local: str, is_open: bool, today: str, next_opening: str
 ) -> None:
     """Opening is inclusive and closing exclusive; Sundays are closed."""
-    status = opening_status(datetime.fromisoformat(local).replace(tzinfo=CAMPO_GRANDE))
+    status = opening_status(datetime.fromisoformat(local).replace(tzinfo=CAMPO_GRANDE), HOURS)
     assert status["open_by_regular_hours"] is is_open
     assert status["today"] == today
     assert status["next_opening"] == next_opening
@@ -194,7 +203,7 @@ def test_return_windows_count_calendar_days_inclusively(
     inside: bool,
 ) -> None:
     """Regret and preference count from receipt; the store's defect exchange from purchase."""
-    result = return_window(reason, channel, purchased, received, TODAY)
+    result = return_window(reason, channel, purchased, received, TODAY, TERMS)
     window = cast(dict[str, object], result[field]) if field else result
     assert window["deadline"] == deadline
     assert window["within_window"] is inside
@@ -219,12 +228,12 @@ def test_return_window_asks_for_missing_or_invalid_customer_dates(
 ) -> None:
     """Missing receipt or channel is asked for, never assumed."""
     with pytest.raises(ValueError, match=message):
-        return_window(reason, channel, purchased, received, TODAY)
+        return_window(reason, channel, purchased, received, TODAY, TERMS)
 
 
 def test_store_purchases_have_no_withdrawal_right() -> None:
     """In-store regret is referred to WhatsApp, without a deadline or an offer."""
-    result = return_window("regret", "store", "2026-11-18", None, TODAY)
+    result = return_window("regret", "store", "2026-11-18", None, TODAY, TERMS)
     assert result["applicable"] is False
     assert "Refer the customer to WhatsApp" in str(result["explanation"])
     assert "do not offer an exchange" in str(result["explanation"])
@@ -253,7 +262,12 @@ def test_return_tool_cites_the_manual_and_never_approves(manual: Snapshot, tmp_p
 )
 def test_metro_shipping_is_free_only_above_five_hundred_reais(final_cents: int, fee: int) -> None:
     """Exactly R$ 500,00 still pays the R$ 35,00 fee."""
-    assert metro_shipping_cents(final_cents) == fee
+    assert (
+        metro_shipping_cents(
+            final_cents, threshold_cents=50000, fee_cents=3500, free_at_threshold=False
+        )
+        == fee
+    )
 
 
 @pytest.mark.parametrize(
@@ -299,6 +313,7 @@ def order_snapshot(manual: Snapshot, price_cents: int, promotion: str | None = N
         small_snapshot(price_cents=price_cents, promotion_percent=promotion),
         policies=manual.policies,
         rules=manual.rules,
+        rulings=manual.rulings,
     )
 
 
@@ -533,12 +548,12 @@ def test_evidence_is_computed_once_per_snapshot(manual: Snapshot, tmp_path: Path
 
 def test_defect_after_thirty_days_goes_to_manufacturer_intermediation() -> None:
     """Four months later the store window is closed, but no warranty deadline is declared."""
-    result = return_window("defect", "online", "2026-07-20", "2026-07-24", TODAY)
+    result = return_window("defect", "online", "2026-07-20", "2026-07-24", TODAY, TERMS)
     window = cast(dict[str, object], result["store_exchange"])
     assert (window["deadline"], window["within_window"]) == ("2026-08-19", False)
     note = str(result["after_store_exchange"])
     assert "manufacturer" in note
-    assert "6 months to 2 years" in note
+    assert "6 meses a 2 anos" in note
     assert "intermediate" in note
     assert "Never say the warranty has expired" in note
     assert "legal_warranty_intermediation" not in result
@@ -546,7 +561,7 @@ def test_defect_after_thirty_days_goes_to_manufacturer_intermediation() -> None:
 
 def test_online_regret_states_every_condition_of_section_4_1() -> None:
     """Packaging, refund method and term, return shipping and the WhatsApp channel."""
-    result = return_window("regret", "online", "2026-11-01", "2026-11-13", TODAY)
+    result = return_window("regret", "online", "2026-11-01", "2026-11-13", TODAY, TERMS)
     conditions = str(result["conditions"])
     for part in (
         "Original packaging",
@@ -560,7 +575,60 @@ def test_online_regret_states_every_condition_of_section_4_1() -> None:
 @pytest.mark.parametrize("purchased", ["2026-11-18", None])
 def test_in_store_preference_exchange_is_referred_to_whatsapp(purchased: str | None) -> None:
     """In-store preference exchanges get no deadline or promise, only the WhatsApp referral."""
-    result = return_window("preference", "store", purchased, None, TODAY)
+    result = return_window("preference", "store", purchased, None, TODAY, TERMS)
     assert result["applicable"] is False
     assert "Refer the customer to WhatsApp" in str(result["explanation"])
     assert "deadline" not in result
+
+
+def test_manual_values_match_the_delivered_pdf(manual: Snapshot) -> None:
+    """Amounts, deadlines and hours are read from the PDF, matching this module's constants."""
+    values = PolicyEvidence(sections(manual)).values
+    assert values.weekly_hours == HOURS
+    assert (values.metro_threshold_cents, values.metro_fee_cents) == (50000, 3500)
+    assert (values.regret_days, values.refund_business_days) == (TERMS.regret_days, 10)
+    assert (values.preference_days, values.defect_days) == (7, 30)
+    assert values.complaint_hours == 24
+    assert values.manufacturer_warranty == TERMS.manufacturer_warranty
+
+
+def test_a_consistent_manual_update_changes_the_rules(manual: Snapshot, tmp_path: Path) -> None:
+    """A revised PDF with a R$ 600,00 threshold and 19:00 closing is applied, not disabled."""
+    edited = tuple(
+        replace(
+            section,
+            text=section.text.replace("R$ 500,00", "R$ 600,00").replace("18:00", "19:00"),
+        )
+        for section in sections(manual)
+    )
+    evidence = PolicyEvidence(edited)
+    assert evidence.has("metro_shipping", "hours")
+    assert evidence.values.metro_threshold_cents == 60000
+    assert evidence.values.weekly_hours is not None
+    assert evidence.values.weekly_hours[0] == (time(9), time(19))
+    assert manual.policies is not None
+    policies = PolicyIndex(
+        manual.policies.chunks, edited, FixedEmbedder(), manual.policies.fingerprint
+    )
+    quote = tools(replace(manual, policies=policies), tmp_path).calculate_quote(
+        [{"product_id": 89}], payment_method="credit"
+    )
+    assert (quote["total"], quote["metro_region_shipping"]) == ("R$ 549,00", "R$ 35,00")
+
+
+def test_contradictory_or_missing_values_disable_their_rule(manual: Snapshot) -> None:
+    """Two different return deadlines, or no complaint response time, switch the rule off."""
+    edited = tuple(
+        replace(
+            section,
+            text=section.text.replace("Após os 30 dias", "Após os 15 dias").replace(
+                "Prazo de retorno: 24 horas úteis", "Prazo de retorno: em breve"
+            ),
+        )
+        for section in sections(manual)
+    )
+    evidence = PolicyEvidence(edited)
+    assert evidence.values.defect_days is None
+    assert evidence.values.complaint_hours is None
+    assert not evidence.has("defect") and not evidence.has("complaints")
+    assert evidence.has("regret", "preference", "metro_shipping", "hours")
