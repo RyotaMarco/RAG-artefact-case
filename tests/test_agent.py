@@ -513,6 +513,7 @@ def test_prompt_greets_once_and_asks_only_for_the_missing_return_date(tmp_path: 
     assert "You may ask for the purchase date but never require it" in system
     assert "ask the customer to confirm it, never state it as a fact" in system
     assert "to mention a PIX price, call calculate_quote with payment_method pix" in system
+    assert "do not retract, correct or apologize for them unless a tool result" in system
     assert "The receipt date comes only from the customer" in system
     assert "the purchase date and the date the product was received, then call" not in system
 
