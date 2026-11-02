@@ -53,10 +53,10 @@ Set `ANTHROPIC_API_KEY` and `VOYAGE_API_KEY` in `.env`. The store's business rul
 
 ```bash
 uv sync --locked
-uv run --locked streamlit run app.py
+uv run --locked --env-file .env streamlit run app.py
 ```
 
-Open http://localhost:8501.
+Open http://localhost:8501. The app reads its settings from environment variables; `--env-file .env` passes them to the process (Docker Compose reads `.env` on its own).
 
 ### 2b. Run with Docker Compose
 
@@ -90,8 +90,8 @@ uv run --locked pytest -m e2e
 Paid tests and the example-conversation recorder require an explicit opt-in:
 
 ```bash
-RUN_LIVE_TESTS=1 uv run --locked pytest -m live
-RUN_LIVE_TESTS=1 uv run --locked python -m scripts.run_scenarios       # writes examples/NN-name.md
+RUN_LIVE_TESTS=1 uv run --locked --env-file .env pytest -m live
+RUN_LIVE_TESTS=1 uv run --locked --env-file .env python -m scripts.run_scenarios   # writes examples/NN-name.md
 ```
 
 The offline tests load the real PDF and CSVs with deterministic local embeddings, so rule extraction and the tools are checked against the delivered sources, not only against fixtures. CI runs the branch-flow check, pyright, ruff, the full test suite with browser tests, and the Docker build with a health check on every pull request.
