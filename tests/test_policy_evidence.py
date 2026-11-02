@@ -47,7 +47,7 @@ def test_every_rule_finds_its_quotes_in_the_delivered_manual(manual: Snapshot) -
         assert evidence.has(rule), rule
     assert {c.section for c in evidence.citations("defect")} == {
         "4.2 Trocas por Defeito",
-        "8.1 Garantia Legal",
+        "8.2 Garantia do Fabricante",
     }
 
 
@@ -181,24 +181,8 @@ TODAY = date(2026, 11, 20)
         ("preference", "store", "2026-11-13", None, None, "2026-11-20", True),
         ("defect", "online", "2026-10-21", "2026-10-25", "store_exchange", "2026-11-20", True),
         ("defect", "online", "2026-10-20", "2026-10-25", "store_exchange", "2026-11-19", False),
-        (
-            "defect",
-            "store",
-            "2026-08-22",
-            None,
-            "legal_warranty_intermediation",
-            "2026-11-20",
-            True,
-        ),
-        (
-            "defect",
-            "online",
-            "2026-08-10",
-            "2026-08-21",
-            "legal_warranty_intermediation",
-            "2026-11-19",
-            False,
-        ),
+        ("defect", "online", "2026-10-21", None, "store_exchange", "2026-11-20", True),
+        ("defect", "store", "2026-10-21", None, "store_exchange", "2026-11-20", True),
     ],
 )
 def test_return_windows_count_calendar_days_inclusively(
@@ -210,7 +194,7 @@ def test_return_windows_count_calendar_days_inclusively(
     deadline: str,
     inside: bool,
 ) -> None:
-    """Regret and preference count from receipt, defects from purchase (30) and receipt (90)."""
+    """Regret and preference count from receipt; the store's defect exchange from purchase."""
     result = return_window(reason, channel, purchased, received, TODAY)
     window = cast(dict[str, object], result[field]) if field else result
     assert window["deadline"] == deadline
@@ -222,7 +206,7 @@ def test_return_windows_count_calendar_days_inclusively(
     [
         ("regret", "online", "2026-11-01", None, "date the product was received"),
         ("preference", "online", "2026-11-01", None, "date the product was received"),
-        ("defect", "online", None, "2026-11-01", "purchase date and the receipt date"),
+        ("defect", "online", None, "2026-11-01", "Ask the customer for the purchase date"),
         ("preference", "store", None, None, "in-store purchases have no separate receipt date"),
         ("defect", "store", None, None, "in-store purchases have no separate receipt date"),
         ("regret", "phone", "2026-11-01", "2026-11-02", "online or in the physical store"),
@@ -546,3 +530,16 @@ def test_evidence_is_computed_once_per_snapshot(manual: Snapshot, tmp_path: Path
     assert first.evidence is second.evidence is manual.evidence
     assert replace(manual, policies=None).evidence is not manual.evidence
     assert not replace(manual, policies=None).evidence.has("hours")
+
+
+def test_defect_after_thirty_days_goes_to_manufacturer_intermediation() -> None:
+    """Four months later the store window is closed, but no warranty deadline is declared."""
+    result = return_window("defect", "online", "2026-07-20", "2026-07-24", TODAY)
+    window = cast(dict[str, object], result["store_exchange"])
+    assert (window["deadline"], window["within_window"]) == ("2026-08-19", False)
+    note = str(result["after_store_exchange"])
+    assert "manufacturer" in note
+    assert "6 months to 2 years" in note
+    assert "intermediate" in note
+    assert "Never say the warranty has expired" in note
+    assert "legal_warranty_intermediation" not in result
