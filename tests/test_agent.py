@@ -206,9 +206,10 @@ def test_deployment_settings_reach_native_sdk_and_store_context(tmp_path: Path) 
         assert stub.requests[0]["max_tokens"] == 777
 
 
-def test_native_tool_loop_and_sdk_configuration(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model_id", ["claude-haiku-5-5", "claude-sonnet-5-5"])
+def test_native_tool_loop_and_sdk_configuration(tmp_path: Path, model_id: str) -> None:
     """Run real SQL through a native tool round trip and inspect the actual HTTP payload."""
-    settings = _settings(tmp_path)
+    settings = replace(_settings(tmp_path), model=model_id)
     with _agent(
         settings,
         small_snapshot(),
@@ -225,8 +226,8 @@ def test_native_tool_loop_and_sdk_configuration(tmp_path: Path) -> None:
         assert len(stub.requests) == 2
         first = stub.requests[0]
         assert first["model"] == settings.model
-        assert first["max_tokens"] == 1024
-        assert first["thinking"] == {"type": "between_tools"}
+        assert first["max_tokens"] == 2048
+        assert first["thinking"] == {"type": "adaptive"}
         assert first["output_config"] == {"effort": "low"}
         assert all(name not in first for name in ("temperature", "top_p", "top_k"))
         assert "English" in str(first["system"])
