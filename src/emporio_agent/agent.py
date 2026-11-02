@@ -81,9 +81,10 @@ Use order_date and estimated_delivery only as labeled; neither proves actual rec
 For withdrawal, exchanges and defects ask for the purchase channel (online or store) if it is
 unknown, then call check_return_window with the dates the customer already gave. The tool says
 which date is still missing; ask only for that one. You may ask for the purchase date but never
-require it: when the customer does not give it and the order is verified, the tool uses the order
-date from the store's records (purchase_date_source) and you tell the customer which date was used.
-The receipt date comes only from the customer. Never mention these rules to the customer. Do not
+require it: when a deadline needs it and the order is verified, the tool takes the order date from
+the store's records and returns confirm_with_customer; say the record shows that date and ask the
+customer to confirm it, never state it as a fact. Mention a purchase date only when the tool used
+it. The receipt date comes only from the customer. Never mention these rules to the customer. Do not
 promise an approval. For a complaint about a verified order
 call register_complaint with a summary free of personal data, then give the protocol, the WhatsApp
 message containing it and the response time; without a verified order, refer to WhatsApp with no
@@ -108,7 +109,9 @@ Correct at most one recoverable query mistake; report authorization or capabilit
 
 Use calculate_quote for discounts, payment-specific amounts and installments, with every product
 of the order in one call. Do not calculate money mentally, add separate quotes or combine discounts
-yourself. The tool checks current stock, active promotions,
+yourself. Every amount you state must come from a tool result: to mention a PIX price, call
+calculate_quote with payment_method pix. The PIX discount applies unless the product has an active
+promotion; never deny or confirm it without a quote. The tool checks current stock, active promotions,
 source payment conditions, ambiguity and exact rounding. Show both original and promotional price
 when relevant. A quote is informational, not a purchase. If a payment rule is unsupported, say so
 and refer the customer to staff. Never invent minimum installments or discount percentages.
@@ -292,9 +295,16 @@ class StoreTools:
                 "staff."
             }
         # The order record is the purchase date; it never stands in for the receipt date.
+        # Only defects, in-store purchases and purchase-based preference windows count from
+        # the purchase; an online withdrawal never needs the order record.
+        needs_purchase = (
+            reason == "defect"
+            or channel == "store"
+            or (reason == "preference" and terms.preference_counts_from == "purchase")
+        )
         source = "customer" if purchased_on else None
         verified = self.access.verified_order()
-        if not purchased_on and verified is not None:
+        if not purchased_on and needs_purchase and verified is not None:
             purchased_on = self.engine.order_date(verified)
             source = "order record" if purchased_on else None
         try:
@@ -306,6 +316,11 @@ class StoreTools:
         if source is not None:
             result["purchase_date_used"] = purchased_on
             result["purchase_date_source"] = source
+        if source == "order record":
+            result["confirm_with_customer"] = (
+                f"The order record shows a purchase date of {purchased_on}. Tell the customer the "
+                "record shows it and ask them to confirm; do not state it as a fact."
+            )
         keys = (reason, "not_exchangeable") if reason != "defect" else (reason,)
         self.sources.extend(_citations(self.evidence.citations(*keys)))
         result["note"] = (
