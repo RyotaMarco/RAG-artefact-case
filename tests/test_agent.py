@@ -511,3 +511,15 @@ def test_prompt_greets_once_and_asks_only_for_the_missing_return_date(tmp_path: 
     assert "ask only for that one" in system
     assert "never mention order records" in system
     assert "the purchase date and the date the product was received, then call" not in system
+
+
+def test_prompt_leaves_source_citations_to_the_chat_screen(tmp_path: Path) -> None:
+    """Replies do not name files or sections; the UI shows the sources consulted."""
+    with _agent(
+        _settings(tmp_path), small_snapshot(), conversation_token(), [text_response("Ok.")]
+    ) as (agent, _, stub):
+        run_chat(agent, "Oi")
+        system = " ".join(str(stub.requests[0]["system"]).replace("\\n", " ").split())
+    assert "Do not name files, sections or pages in replies" in system
+    assert "Cite the supplied file" not in system
+    assert "cite the policy" not in system
