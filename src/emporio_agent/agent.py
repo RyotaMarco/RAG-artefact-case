@@ -308,7 +308,12 @@ class StoreTools:
             }
         try:
             protocol = record_complaint(
-                self.access.database, self.access.identity, order_id, summary, self.now()
+                self.access.database,
+                self.access.identity,
+                order_id,
+                summary,
+                self.now(),
+                email=self.engine.order_email(order_id),
             )
         except ValueError as error:
             return {"error": str(error)}

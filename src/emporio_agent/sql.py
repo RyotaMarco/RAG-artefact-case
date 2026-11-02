@@ -14,7 +14,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
-from emporio_agent.data import Catalog, Table, Value
+from emporio_agent.data import Catalog, Row, Table, Value
 from emporio_agent.money import MAX_CENTS, format_brl
 
 MAX_ROWS = 50
@@ -418,25 +418,31 @@ class QueryEngine:
             else None
         )
 
-    def customer_first_name(self, verified_order_id: int) -> str | None:
-        """Return only the first name of a verified order's customer, for greetings."""
+    def _order_customer(self, verified_order_id: int) -> Row | None:
         orders = self.catalog.tables.get("orders")
         customers = self.catalog.tables.get("customers")
-        if orders is None or customers is None or "name" not in customers.columns:
+        if orders is None or customers is None:
             return None
         owner = next(
             (row["customer_id"] for row in orders.rows if row["order_id"] == verified_order_id),
             None,
         )
-        name = next(
-            (
-                row["name"]
-                for row in customers.rows
-                if owner is not None and row["customer_id"] == owner
-            ),
+        return next(
+            (row for row in customers.rows if owner is not None and row["customer_id"] == owner),
             None,
         )
+
+    def customer_first_name(self, verified_order_id: int) -> str | None:
+        """Return only the first name of a verified order's customer, for greetings."""
+        customer = self._order_customer(verified_order_id)
+        name = customer.get("name") if customer is not None else None
         return name.split()[0] if isinstance(name, str) and name.split() else None
+
+    def order_email(self, verified_order_id: int) -> str | None:
+        """Return the email of a verified order's customer, for staff follow-up only."""
+        customer = self._order_customer(verified_order_id)
+        email = customer.get("email") if customer is not None else None
+        return email.strip() if isinstance(email, str) and email.strip() else None
 
     def _scope(self, verified_order_id: int | None) -> dict[str, Table]:
         scoped = {name: table for name, table in self.catalog.tables.items() if name in _PUBLIC}
