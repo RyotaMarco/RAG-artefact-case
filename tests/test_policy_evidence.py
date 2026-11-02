@@ -519,3 +519,27 @@ def test_split_payment_requires_methods_the_manual_lists(
     snapshot = replace(snapshot, rules=replace(snapshot.rules, **change))
     result = split(tools(snapshot, tmp_path), first, "1000", "credit")
     assert f"does not list {first} payments" in str(result["error"])
+
+
+@pytest.mark.parametrize(
+    "internal",
+    ["(11) 2345-6789", "11 2345 6789", "(11)23456789", "+55 11 2345.6789", "+55 (11) 98765-4321"],
+)
+def test_mask_hides_internal_phones_in_any_common_format(manual: Snapshot, internal: str) -> None:
+    """Spaces, dots, a missing hyphen or +55 never let an internal phone through."""
+    evidence = PolicyEvidence(sections(manual))
+    assert evidence.mask(f"Ligue {internal} hoje.") == f"Ligue {MASK} hoje."
+    assert evidence.mask("WhatsApp +55 (67) 3321-4500.") == "WhatsApp +55 (67) 3321-4500."
+
+
+def test_mask_keeps_every_non_contact_number_in_the_manual(manual: Snapshot) -> None:
+    """Only the cover and section 1.2 change; CEP, CNPJ, prices and dates stay intact."""
+    evidence = PolicyEvidence(sections(manual))
+    changed = {
+        section.title for section in sections(manual) if evidence.mask(section.text) != section.text
+    }
+    assert changed == {"Document overview", "1.2 Dados da Empresa"}
+    overview = next(s for s in sections(manual) if s.title == "1.2 Dados da Empresa")
+    masked = evidence.mask(overview.text)
+    assert "12.345.678/0001-90" in masked
+    assert "79202-333" in masked

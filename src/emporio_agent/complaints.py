@@ -1,16 +1,16 @@
 """Record customer complaints for staff follow-up, scoped to a verified order."""
 
-import re
 import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from emporio_agent.contacts import CPF, PHONE
+
 PROTOCOL_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 MAX_PER_CONVERSATION = 3
 # Owner ruling: emails may be kept; phones and CPFs typed by the customer are removed.
-_PERSONAL = re.compile(r"\(?\b\d{2}\)?\s*9?\d{4}-?\d{4}\b|\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
 REDACTED = "[dado pessoal omitido]"
 
 
@@ -34,7 +34,7 @@ def record_complaint(
     Raises:
         ValueError: The summary is empty or too long, or the conversation reached its limit.
     """
-    text = _PERSONAL.sub(REDACTED, " ".join(summary.split()))
+    text = CPF.sub(REDACTED, PHONE.sub(REDACTED, " ".join(summary.split())))
     if not 10 <= len(text) <= 1000:
         raise ValueError("Summarize the complaint in 10 to 1000 characters.")
     with closing(sqlite3.connect(database, timeout=10)) as connection, connection:

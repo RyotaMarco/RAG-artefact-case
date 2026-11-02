@@ -4,11 +4,10 @@ import re
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 
+from emporio_agent.contacts import EMAIL, PHONE, phone_digits
 from emporio_agent.documents import Citation, PolicySection
 
 MASK = "[contato interno omitido]"
-_PHONE = re.compile(r"(?:\(\d{2}\)|\b\d{2})\s*\d{4,5}-\d{4}\b")
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _WHATSAPP = re.compile(r"canal de whatsapp\s+(\(\d{2}\)\s*\d{4,5}-\d{4})", re.IGNORECASE)
 
 # A tool applies each rule only while the active manual still contains these quotes in the
@@ -64,10 +63,6 @@ def _matches(title: str, prefix: str) -> bool:
     return title == prefix or title.split(maxsplit=1)[0] == prefix
 
 
-def _digits(text: str) -> str:
-    return re.sub(r"\D", "", text)
-
-
 class PolicyEvidence:
     """Locate rule evidence and the public contacts in the active manual sections."""
 
@@ -105,7 +100,7 @@ class PolicyEvidence:
             match.group(0)
             for section in self._sections
             if section.title == "Document overview"
-            for match in _EMAIL.finditer(section.text)
+            for match in EMAIL.finditer(section.text)
         }
         return found.pop() if len(found) == 1 else None
 
@@ -121,15 +116,15 @@ class PolicyEvidence:
 
     def mask(self, text: str) -> str:
         """Hide every phone and email except the section 7 WhatsApp and the cover email."""
-        phone = _digits(self.whatsapp) if self.whatsapp else None
+        phone = phone_digits(self.whatsapp) if self.whatsapp else None
 
         def phones(match: re.Match[str]) -> str:
-            return match.group(0) if _digits(match.group(0)) == phone else MASK
+            return match.group(0) if phone_digits(match.group(0)) == phone else MASK
 
         def emails(match: re.Match[str]) -> str:
             return match.group(0) if match.group(0) == self.email else MASK
 
-        return _EMAIL.sub(emails, _PHONE.sub(phones, text))
+        return EMAIL.sub(emails, PHONE.sub(phones, text))
 
 
 # Regular hours from manual section 2, applied only while the "hours" evidence is found.
