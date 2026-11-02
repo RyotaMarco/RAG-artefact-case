@@ -18,6 +18,7 @@ from emporio_agent.store_facts import (
     MASK,
     TOPICS,
     StoreFacts,
+    metro_shipping_cents,
     opening_status,
     return_window,
 )
@@ -276,3 +277,48 @@ def test_return_tool_cites_the_manual_and_never_approves(manual: Snapshot, tmp_p
     assert "received" in str(missing["error"])
     other = tools(small_snapshot(), tmp_path / "other")
     assert "error" in other.check_return_window("regret", "online", "2026-11-01", "2026-11-13")
+
+
+@pytest.mark.parametrize(
+    ("final_cents", "fee"), [(49999, 3500), (50000, 3500), (50001, 0), (129900, 0)]
+)
+def test_metro_shipping_is_free_only_above_five_hundred_reais(final_cents: int, fee: int) -> None:
+    """Exactly R$ 500,00 still pays the R$ 35,00 fee."""
+    assert metro_shipping_cents(final_cents) == fee
+
+
+@pytest.mark.parametrize(
+    ("product_id", "method", "total", "fee", "with_shipping"),
+    [
+        (89, "credit", "BRL 549.00", "BRL 0.00", "BRL 549.00"),
+        (89, "pix", "BRL 521.55", "BRL 0.00", "BRL 521.55"),
+        (121, "credit", "BRL 439.20", "BRL 35.00", "BRL 474.20"),
+    ],
+)
+def test_quote_applies_metro_shipping_to_the_final_amount_paid(
+    manual: Snapshot,
+    tmp_path: Path,
+    product_id: int,
+    method: str,
+    total: str,
+    fee: str,
+    with_shipping: str,
+) -> None:
+    """A R$ 549,00 list price promoted to R$ 439,20 pays shipping; PIX stays above R$ 500."""
+    store = tools(manual, tmp_path)
+    result = store.calculate_quote(product_id, payment_method=method)
+    assert result["total"] == total
+    assert result["metro_region_shipping"] == fee
+    assert result["total_with_metro_shipping"] == with_shipping
+    assert "(67) 3321-4500" in str(result["shipping_note"])
+    assert any(
+        source.get("section") == "5.1 Entregas na Região Metropolitana de Campo Grande"
+        for source in store.sources
+    )
+
+
+def test_quote_withholds_shipping_without_a_confirming_manual(tmp_path: Path) -> None:
+    """Fixture PDFs have no shipping clause, so no fee is invented."""
+    result = tools(small_snapshot(), tmp_path).calculate_quote(101)
+    assert "metro_region_shipping" not in result
+    assert "not confirmed" in str(result["shipping_note"])

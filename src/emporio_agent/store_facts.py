@@ -352,6 +352,16 @@ def opening_status(now: datetime) -> dict[str, object]:
     return status
 
 
+# Manual section 5.1; the limit applies to the final amount paid, per the owner's ruling.
+METRO_FREE_ABOVE_CENTS = 50000
+METRO_FEE_CENTS = 3500
+
+
+def metro_shipping_cents(final_total_cents: int) -> int:
+    """Return the metropolitan fee: free strictly above R$ 500,00, R$ 35,00 otherwise."""
+    return 0 if final_total_cents > METRO_FREE_ABOVE_CENTS else METRO_FEE_CENTS
+
+
 # Calendar-day windows from manual sections 4.1-4.3 and 8.1 and the owner's rulings.
 RETURN_FACTS = {"regret": "regret", "preference": "preference_exchange", "defect": "defect"}
 _CHANNELS = ("online", "store")

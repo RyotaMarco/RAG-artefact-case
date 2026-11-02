@@ -29,6 +29,7 @@ from emporio_agent.store_facts import (
     RETURN_FACTS,
     TOPICS,
     StoreFacts,
+    metro_shipping_cents,
     opening_status,
     return_window,
 )
@@ -372,6 +373,20 @@ class StoreTools:
             self.sources.extend(references)
             self.sources.extend({"file": path} for path in tables["products"].source_paths)
             self.sources.extend({"file": path} for path in tables["promotions"].source_paths)
+            shipping: dict[str, object] = {
+                "shipping_note": "Shipping rules are not confirmed by the active manual. Staff "
+                "quote shipping."
+            }
+            if self.facts.has("metro_shipping"):
+                fee = metro_shipping_cents(total)
+                self.sources.extend(_citations(self.facts.citations("metro_shipping")))
+                shipping = {
+                    "metro_region_shipping": format_brl(fee),
+                    "total_with_metro_shipping": format_brl(check_cents(total + fee)),
+                    "shipping_note": "Campo Grande metropolitan region only, based on the final "
+                    "amount paid. Other cities depend on the destination CEP; staff quote it on "
+                    f"WhatsApp {self.facts.whatsapp}.",
+                }
             return {
                 "product": product["name"],
                 "quantity": quantity,
@@ -384,6 +399,7 @@ class StoreTools:
                 "sources": references,
                 "policy_note": quote.note if installments == 1 else None,
                 "note": "Installment amounts sum exactly to the quoted total. This is not a purchase.",
+                **shipping,
             }
         except (ValueError, ArithmeticError) as error:
             return {"error": str(error)}
