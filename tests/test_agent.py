@@ -17,6 +17,7 @@ from agent_fixtures import (
     FixedEmbedder,
     JsonObject,
     latest_user_text,
+    manual_snapshot,
     small_snapshot,
     text_response,
     tool_response,
@@ -512,3 +513,21 @@ def test_prompt_greets_once_and_asks_only_for_the_missing_return_date(tmp_path: 
     assert "You may ask for the purchase date but never require it" in system
     assert "The receipt date comes only from the customer" in system
     assert "the purchase date and the date the product was received, then call" not in system
+
+
+def test_prompt_answers_accessories_from_the_rule_with_the_whatsapp_channel(
+    tmp_path: Path,
+) -> None:
+    """Accessories are answered without catalog searches; the WhatsApp number is in context."""
+    snapshot = manual_snapshot()
+    with _agent(_settings(tmp_path), snapshot, conversation_token(), [text_response("Ok.")]) as (
+        agent,
+        _,
+        stub,
+    ):
+        run_chat(agent, "Vocês vendem cordas?")
+        request = stub.requests[0]
+    system = " ".join(str(request["system"]).replace("\\n", " ").split())
+    assert "without searching the catalog" in system
+    assert "Speak directly to the customer (você)" in system
+    assert '"store_whatsapp": "(67) 3321-4500"' in str(_additional_input(agent))
