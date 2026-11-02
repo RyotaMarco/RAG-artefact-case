@@ -45,7 +45,7 @@ def test_real_embeddings_and_claude_tools() -> None:
             f"What is the current price and stock of product ID {product['product_id']}? "
             "Please consult your data tool and cite its source.",
         )
-        assert answer.strip() and "BRL" in answer
+        assert answer.strip() and "R$" in answer
         assert any(str(source.get("file", "")).lower().endswith(".csv") for source in tools.sources)
     finally:
         close_agent(agent)

@@ -78,7 +78,7 @@ def split_installments(amount_cents: int, count: int) -> tuple[int, ...]:
 
 
 def format_brl(amount_cents: int) -> str:
-    """Format exact integer cents as an English-language BRL amount."""
+    """Format exact integer cents as Brazilian reais, for example R$ 1.299,90."""
     check_cents(amount_cents)
     whole, fraction = divmod(amount_cents, 100)
-    return f"BRL {whole:,}.{fraction:02d}"
+    return f"R$ {whole:,}".replace(",", ".") + f",{fraction:02d}"
