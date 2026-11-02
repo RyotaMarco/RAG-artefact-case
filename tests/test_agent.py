@@ -17,6 +17,7 @@ from agent_fixtures import (
     FixedEmbedder,
     JsonObject,
     latest_user_text,
+    manual_snapshot,
     small_snapshot,
     text_response,
     tool_response,
@@ -524,3 +525,21 @@ def test_prompt_leaves_source_citations_to_the_chat_screen(tmp_path: Path) -> No
     assert "Do not name files, sections or pages in replies" in system
     assert "Cite the supplied file" not in system
     assert "cite the policy" not in system
+
+
+def test_prompt_answers_accessories_from_the_rule_with_the_whatsapp_channel(
+    tmp_path: Path,
+) -> None:
+    """Accessories are answered without catalog searches; the WhatsApp number is in context."""
+    snapshot = manual_snapshot()
+    with _agent(_settings(tmp_path), snapshot, conversation_token(), [text_response("Ok.")]) as (
+        agent,
+        _,
+        stub,
+    ):
+        run_chat(agent, "Vocês vendem cordas?")
+        request = stub.requests[0]
+    system = " ".join(str(request["system"]).replace("\\n", " ").split())
+    assert "without searching the catalog" in system
+    assert "Speak directly to the customer (você)" in system
+    assert '"store_whatsapp": "(67) 3321-4500"' in str(_additional_input(agent))
