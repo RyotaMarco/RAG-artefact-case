@@ -7,12 +7,20 @@ import io
 import json
 from collections import deque
 from collections.abc import Callable, Sequence
+from decimal import localcontext
+from pathlib import Path
 from typing import cast
 
 import httpx2
 
-from emporio_agent.data import SourceFile, build_catalog
-from emporio_agent.documents import Citation, PolicyChunk, PolicyIndex, PolicySection
+from emporio_agent.data import SourceFile, build_catalog, discover_sources
+from emporio_agent.documents import (
+    Citation,
+    PolicyChunk,
+    PolicyIndex,
+    PolicySection,
+    build_index,
+)
 from emporio_agent.policies import extract_rules
 from emporio_agent.runtime import Snapshot
 
@@ -300,3 +308,14 @@ def small_snapshot(
     rules = extract_rules((section,))
     generation = hashlib.sha256((catalog.fingerprint + pix_percent).encode()).hexdigest()
     return Snapshot(generation, catalog, index, rules)
+
+
+def manual_snapshot() -> Snapshot:
+    """Load the delivered CSVs and policy PDF with deterministic offline embeddings."""
+    sources = discover_sources(Path(__file__).parents[1] / "data")
+    pdfs = [source for source in sources if source.relative_path.lower().endswith(".pdf")]
+    index = build_index(pdfs, FixedEmbedder(), CharacterTokenizer())
+    with localcontext() as context:
+        context.prec = 120
+        rules = extract_rules(index.sections)
+    return Snapshot("manual-fixture", build_catalog(sources), index, rules)

@@ -239,6 +239,27 @@ def _merge_tiers(
     return conflicts
 
 
+def _credit_table_rows(text: str) -> set[tuple[int, Decimal]]:
+    return {
+        (int(match.group(1)), _amount(match.group(2)))
+        for match in re.finditer(
+            r"cartao de credito\s+ate\s+(\d+)x\s+sem juros\s+parcela minima de\s+r\$\s*"
+            + _MONEY_PATTERN,
+            text,
+        )
+    }
+
+
+def _table_conflicts(rows: set[tuple[int, Decimal]], tiers: list[InstallmentTier]) -> list[str]:
+    """The payment table's credit row must restate the highest installment tier."""
+    if not tiers:
+        return []
+    top = tiers[-1]
+    if any((count, minimum) != (top.maximum_count, top.minimum_amount) for count, minimum in rows):
+        return ["The payment table's credit row disagrees with the installment tiers."]
+    return []
+
+
 def _rule_conflicts(
     rates: set[Decimal], stacking: set[bool], mixed: set[Decimal], tiers: list[InstallmentTier]
 ) -> list[str]:
@@ -263,6 +284,7 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
     tiers: dict[tuple[int, int], InstallmentTier] = {}
     citations: list[Citation] = []
     single_payment_methods: set[str] = set()
+    credit_rows: set[tuple[int, Decimal]] = set()
     conflicts: list[str] = []
     for section in sections:
         text = _normalized(section.text)
@@ -270,6 +292,8 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
         methods, method_errors = _single_payment_rules(text)
         section_tiers, tier_errors = _installment_rules(text, section.citations)
         section_stacking = _stacking_rules(text)
+        section_rows = _credit_table_rows(text)
+        credit_rows.update(section_rows)
         rates.update(section_rates)
         single_payment_methods.update(methods)
         stacking.update(section_stacking)
@@ -287,6 +311,7 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
                 methods,
                 section_tiers,
                 section_stacking,
+                section_rows,
                 pix_errors,
                 method_errors,
                 tier_errors,
@@ -296,6 +321,7 @@ def extract_rules(sections: tuple[PolicySection, ...]) -> FinancialRuleSet:
             citations.extend(section.citations)
     ordered = sorted(tiers.values(), key=lambda tier: (tier.minimum_count, tier.maximum_count))
     conflicts.extend(_rule_conflicts(rates, stacking, mixed, ordered))
+    conflicts.extend(_table_conflicts(credit_rows, ordered))
     return FinancialRuleSet(
         next(iter(rates)) if len(rates) == 1 else None,
         tuple(ordered),

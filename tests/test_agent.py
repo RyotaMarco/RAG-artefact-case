@@ -454,3 +454,28 @@ def test_replaced_source_generation_revokes_order_scope_without_losing_history(
         assert tools.access.verified_order() is None
         assert "The order details are verified." in str(_additional_input(agent))
         assert len(chat_messages(agent, token)) == 2
+
+
+def test_store_fact_tools_reach_the_model_with_matching_instructions(tmp_path: Path) -> None:
+    """Every new tool is offered to the model and named in the system instructions."""
+    names = (
+        "store_open_now",
+        "check_return_window",
+        "register_complaint",
+        "search_policies",
+        "verify_order",
+        "query_data",
+        "calculate_quote",
+    )
+    with _agent(
+        _settings(tmp_path), small_snapshot(), conversation_token(), [text_response("Hi!")]
+    ) as (agent, _, stub):
+        run_chat(agent, "Hello")
+        request = stub.requests[0]
+    offered = {
+        str(tool["name"]) for tool in cast(list[JsonObject], request["tools"]) if "name" in tool
+    }
+    assert set(names) <= offered
+    for name in names:
+        assert name in str(request["system"]), name
+    assert "[contato interno omitido]" in str(request["system"])
