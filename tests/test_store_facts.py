@@ -10,7 +10,7 @@ from agent_fixtures import manual_snapshot, small_snapshot
 from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
 from emporio_agent.documents import PolicySection
 from emporio_agent.runtime import Snapshot
-from emporio_agent.store_facts import FACTS, TOPICS, StoreFacts
+from emporio_agent.store_facts import FACTS, MASK, TOPICS, StoreFacts
 
 PHONE = re.compile(r"\(?\d{2}\)?\s*\d{4,5}-\d{4}")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -98,3 +98,28 @@ def test_tool_fails_closed_without_a_confirming_manual(tmp_path: Path) -> None:
     assert "does not confirm" in str(store.store_facts("contact")["error"])
     assert "Unknown topic" in str(store.store_facts("taxes")["error"])
     assert store.sources == []
+
+
+def test_policy_search_masks_internal_contacts(manual: Snapshot, tmp_path: Path) -> None:
+    """Registration contacts in the manual never reach the model; public ones remain."""
+    facts = StoreFacts(sections(manual))
+    raw = " ".join(section.text for section in sections(manual))
+    assert {match.group(0) for match in PHONE.finditer(raw)} - {facts.whatsapp}
+    assert {match.group(0) for match in EMAIL.finditer(raw)} - {facts.email}
+    assert manual.policies is not None
+    for chunk in manual.policies.chunks:
+        masked = facts.mask(chunk.text)
+        assert {match.group(0) for match in PHONE.finditer(masked)} <= {facts.whatsapp}
+        assert {match.group(0) for match in EMAIL.finditer(masked)} <= {facts.email}
+    store = tools(manual, tmp_path)
+    passages = str(store.search_policies("Dados da Empresa CNPJ Telefone E-mail"))
+    assert MASK in passages
+    assert "CNPJ" in passages
+    assert {match.group(0) for match in PHONE.finditer(passages)} <= {facts.whatsapp}
+
+
+def test_mask_hides_every_contact_when_the_manual_confirms_none() -> None:
+    """Without a confirmed public channel, all phones and emails are withheld."""
+    facts = StoreFacts(())
+    text = "Ligue (11) 2345-6789 ou 11 98765-4321, escreva para a@b.com.br. CEP 79202-333."
+    assert facts.mask(text) == f"Ligue {MASK} ou {MASK}, escreva para {MASK}. CEP 79202-333."

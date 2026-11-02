@@ -182,7 +182,7 @@ class StoreTools:
             for hit in hits:
                 references = _citations(hit.citations)
                 self.sources.extend(references)
-                passages.append({"text": hit.text, "sources": references})
+                passages.append({"text": self.facts.mask(hit.text), "sources": references})
             return {"passages": passages, "generation": self.snapshot.generation_id}
         except ValueError as error:
             return {"error": f"Policy retrieval is unavailable: {error}"}
