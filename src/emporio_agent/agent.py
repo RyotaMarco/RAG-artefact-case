@@ -78,9 +78,11 @@ an email or a previous message. The SQL worker enforces scope independently of y
 Use order_date and estimated_delivery only as labeled; neither proves actual receipt or channel.
 For withdrawal, exchanges and defects ask for the purchase channel (online or store) if it is
 unknown, then call check_return_window with the dates the customer already gave. The tool says
-which date is still missing; ask only for that one. Dates come only from the customer, never from
-order records, and never mention order records or these rules to the customer. Do not promise an
-approval. For a complaint about a verified order
+which date is still missing; ask only for that one. You may ask for the purchase date but never
+require it: when the customer does not give it and the order is verified, the tool uses the order
+date from the store's records (purchase_date_source) and you tell the customer which date was used.
+The receipt date comes only from the customer. Never mention these rules to the customer. Do not
+promise an approval. For a complaint about a verified order
 call register_complaint with a summary free of personal data, then give the protocol, the WhatsApp
 message containing it and the response time; without a verified order, refer to WhatsApp with no
 protocol. Never pretend to submit a return, payment or message: no other tool records anything.
@@ -265,8 +267,8 @@ class StoreTools:
         Parameters:
             reason: regret (withdrawal), preference (exchange) or defect.
             channel: online or store, as stated by the customer.
-            purchased_on: Purchase date YYYY-MM-DD, only if the customer gave it. Online
-                withdrawal does not need it; defects and in-store purchases do.
+            purchased_on: Purchase date YYYY-MM-DD, if the customer gave it. When omitted for
+                a verified order, the order date from the store's records is used.
             received_on: Receipt date YYYY-MM-DD, only if the customer gave it. Never use
                 order_date or estimated_delivery from the order records.
 
@@ -283,12 +285,21 @@ class StoreTools:
                 "error": "The active manual does not confirm this rule. Refer the customer to "
                 "staff."
             }
+        # The order record is the purchase date; it never stands in for the receipt date.
+        source = "customer" if purchased_on else None
+        verified = self.access.verified_order()
+        if not purchased_on and verified is not None:
+            purchased_on = self.engine.order_date(verified)
+            source = "order record" if purchased_on else None
         try:
             result = return_window(
                 reason, channel, purchased_on, received_on, self.now().date(), terms
             )
         except ValueError as error:
             return {"error": str(error)}
+        if source is not None:
+            result["purchase_date_used"] = purchased_on
+            result["purchase_date_source"] = source
         keys = (reason, "not_exchangeable") if reason != "defect" else (reason,)
         self.sources.extend(_citations(self.evidence.citations(*keys)))
         result["note"] = (
