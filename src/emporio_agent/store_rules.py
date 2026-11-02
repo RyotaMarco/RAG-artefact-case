@@ -111,7 +111,15 @@ def return_window(
     if reason == "regret" and channel == "store":
         result["applicable"] = False
         result["explanation"] = (
-            "The right of withdrawal covers online purchases only. Offer a preference exchange."
+            "The right of withdrawal covers online purchases only. Refer the customer to "
+            "WhatsApp for clarification; do not offer an exchange or alternative yourself."
+        )
+        return result
+    if reason == "preference" and channel == "store":
+        result["applicable"] = False
+        result["explanation"] = (
+            "Preference exchanges for in-store purchases are handled by staff. Refer the "
+            "customer to WhatsApp; do not calculate a deadline or promise an exchange."
         )
         return result
     if reason in {"regret", "preference"}:
@@ -119,7 +127,9 @@ def return_window(
             raise ValueError(_missing_date(channel))
         result.update(_window(received, 7, today))
         result["conditions"] = (
-            "Original packaging, unused, with all accessories and manuals."
+            "Original packaging, unused, with all accessories and manuals. Refund with the "
+            "original payment method within 10 business days; the store pays the return "
+            "shipping. The customer starts the return on WhatsApp."
             if reason == "regret"
             else "Perfect condition, original packaging, and the desired product available."
         )
