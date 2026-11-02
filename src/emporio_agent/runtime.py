@@ -8,6 +8,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from decimal import localcontext
+from functools import cached_property
 from pathlib import Path
 from threading import RLock
 
@@ -37,6 +38,7 @@ from emporio_agent.embeddings import (
     VoyageEmbedder,
 )
 from emporio_agent.policies import FinancialRuleSet, extract_rules
+from emporio_agent.policy_evidence import PolicyEvidence
 
 PIPELINE_VERSION = "layout-catalog-money-v2"
 logger = logging.getLogger(__name__)
@@ -64,6 +66,11 @@ class Snapshot:
     catalog: Catalog
     policies: PolicyIndex | None
     rules: FinancialRuleSet
+
+    @cached_property
+    def evidence(self) -> PolicyEvidence:
+        """Locate rule evidence and public contacts once for this immutable snapshot."""
+        return PolicyEvidence(self.policies.sections if self.policies else ())
 
     def capabilities(self) -> dict[str, bool]:
         """Describe which user requests the supplied sources can actually support."""

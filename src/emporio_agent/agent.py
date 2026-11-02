@@ -27,20 +27,19 @@ from emporio_agent.money import (
     check_cents,
     discounted_cents,
     format_brl,
-    parse_money_cents,
+    parse_customer_amount,
     split_installments,
 )
-from emporio_agent.policies import PolicyUnavailableError
-from emporio_agent.policy_evidence import (
+from emporio_agent.policies import PolicyUnavailableError, normalize_method
+from emporio_agent.runtime import Snapshot
+from emporio_agent.sql import QueryEngine, QueryError
+from emporio_agent.store_rules import (
     RETURN_REASONS,
     SPLIT_METHODS,
-    PolicyEvidence,
     metro_shipping_cents,
     opening_status,
     return_window,
 )
-from emporio_agent.runtime import Snapshot
-from emporio_agent.sql import QueryEngine, QueryError
 
 INSTRUCTIONS = """
 You are the virtual assistant of Empório da Música, a musical instrument store in Campo Grande -
@@ -203,7 +202,7 @@ class StoreTools:
         self.access = access
         self.timezone = ZoneInfo(timezone)
         self.engine = QueryEngine(snapshot.catalog)
-        self.evidence = PolicyEvidence(snapshot.policies.sections if snapshot.policies else ())
+        self.evidence = snapshot.evidence
         self.sources: list[dict[str, object]] = []
         self.query_failures = 0
 
@@ -308,7 +307,12 @@ class StoreTools:
             }
         try:
             protocol = record_complaint(
-                self.access.database, self.access.identity, order_id, summary, self.now()
+                self.access.database,
+                self.access.identity,
+                order_id,
+                summary,
+                self.now(),
+                email=self.engine.order_email(order_id),
             )
         except ValueError as error:
             return {"error": str(error)}
@@ -473,7 +477,7 @@ class StoreTools:
             catalog_total = check_cents(regular + promoted)
             # The PIX discount never applies to promotional prices, so it covers only the
             # regular-price subtotal; any other method is quoted on the whole order.
-            if payment_method.casefold().strip() == "pix":
+            if normalize_method(payment_method) == "pix":
                 parts = [part for part in ((regular, False), (promoted, True)) if part[0]]
                 parts = parts or [(0, False)]
             else:
@@ -513,6 +517,37 @@ class StoreTools:
         except (ValueError, ArithmeticError) as error:
             return {"error": str(error)}
 
+    def _split_part(
+        self, method: str, amount: int, count: int
+    ) -> tuple[dict[str, object], tuple[Citation, ...]]:
+        """Validate one part of a combined payment against the manual's payment rules."""
+        rules = self.snapshot.rules
+        if (method == "debit" and "debit" not in rules.single_payment_methods) or (
+            method == "pix" and rules.pix_rate is None
+        ):
+            raise PolicyUnavailableError(
+                f"The active manual does not list {method} payments. Refer to staff."
+            )
+        citations: tuple[Citation, ...] = ()
+        if method == "credit":
+            with localcontext() as context:
+                context.prec = 120
+                quote = rules.quote(
+                    Decimal(amount) / 100, payment_method="credit", installments=count
+                )
+            citations = quote.citations
+        elif count != 1:
+            raise ValueError(f"The {method} part is paid in a single payment.")
+        payment: dict[str, object] = {
+            "method": method,
+            "amount": format_brl(amount),
+            "installments": count,
+            "installment_amounts": [
+                format_brl(value) for value in split_installments(amount, count)
+            ],
+        }
+        return payment, citations
+
     def calculate_split_payment(
         self,
         items: list[dict[str, int]],
@@ -527,7 +562,8 @@ class StoreTools:
         Parameters:
             items: Every product in the order as {"product_id": id, "quantity": n}.
             first_method: pix, credit or debit.
-            first_amount: Amount the customer stated for the first method, like "1000.00".
+            first_amount: Amount the customer stated for the first method, as written, like
+                "1.000" or "1.000,50".
             second_method: A different method among pix, credit and debit; it pays the rest.
             first_installments: Credit installments for the first part, otherwise 1.
             second_installments: Credit installments for the second part, otherwise 1.
@@ -545,11 +581,7 @@ class StoreTools:
                 raise PolicyUnavailableError(
                     "The active manual does not confirm combined payments. Refer to staff."
                 )
-            aliases = {"credit_card": "credit", "debit_card": "debit"}
-            methods = [
-                aliases.get(name.casefold().strip(), name.casefold().strip())
-                for name in (first_method, second_method)
-            ]
+            methods = [normalize_method(name) for name in (first_method, second_method)]
             if not set(methods) <= set(SPLIT_METHODS) or methods[0] == methods[1]:
                 raise ValueError(
                     "Combine two different methods among PIX, credit and debit. Boleto takes up "
@@ -563,36 +595,17 @@ class StoreTools:
                     f"Combined payment requires an order above {format_brl(minimum)}; this "
                     f"order totals {format_brl(total)}."
                 )
-            first = parse_money_cents(first_amount)
+            first = parse_customer_amount(first_amount)
             if not 0 < first < total:
                 raise ValueError(
                     f"The first amount must be above zero and below {format_brl(total)}."
                 )
-            payments: list[dict[str, object]] = []
-            citations: list[Citation] = list(rules.citations)
-            for method, amount, count in (
-                (methods[0], first, first_installments),
-                (methods[1], total - first, second_installments),
-            ):
-                if method == "credit":
-                    with localcontext() as context:
-                        context.prec = 120
-                        quote = rules.quote(
-                            Decimal(amount) / 100, payment_method="credit", installments=count
-                        )
-                    citations.extend(quote.citations)
-                elif count != 1:
-                    raise ValueError(f"The {method} part is paid in a single payment.")
-                payments.append(
-                    {
-                        "method": method,
-                        "amount": format_brl(amount),
-                        "installments": count,
-                        "installment_amounts": [
-                            format_brl(value) for value in split_installments(amount, count)
-                        ],
-                    }
-                )
+            parts = [
+                self._split_part(methods[0], first, first_installments),
+                self._split_part(methods[1], total - first, second_installments),
+            ]
+            payments = [payment for payment, _ in parts]
+            citations = [*rules.citations, *(c for _, found in parts for c in found)]
             references = _citations(
                 tuple(dict.fromkeys((*citations, *self.evidence.citations("mixed_payment"))))
             )

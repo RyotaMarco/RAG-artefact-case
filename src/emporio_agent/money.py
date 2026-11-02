@@ -39,6 +39,36 @@ def parse_money_cents(value: str) -> int:
         return check_cents(int(cents))
 
 
+_BRAZILIAN_AMOUNT = re.compile(r"(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?")
+_ENGLISH_AMOUNT = re.compile(r"(\d{1,3}(?:,\d{3})+|\d+)\.(\d{1,2})")
+AMOUNT_HINT = (
+    "Could not read that amount. Kindly ask the customer to write it again, for example "
+    "1.000 or 1.000,50."
+)
+
+
+def parse_customer_amount(value: str) -> int:
+    """Read an amount typed by a customer, Brazilian style first, as exact integer cents.
+
+    Accepts 1000, 1.000, 1.000,50, 1000,50, R$ 1.000,00 and the English 1,000.50 or 1000.50.
+    A dot followed by exactly three digits is a thousands separator; ambiguous forms such as
+    1,000 are refused instead of guessed.
+
+    Raises:
+        ValueError: The amount cannot be read unambiguously.
+    """
+    text = value.strip().removeprefix("R$").removeprefix("r$").strip()
+    if len(text) > 40:
+        raise ValueError(AMOUNT_HINT)
+    if match := _BRAZILIAN_AMOUNT.fullmatch(text):
+        whole, fraction = match.group(1).replace(".", ""), match.group(2) or "0"
+    elif match := _ENGLISH_AMOUNT.fullmatch(text):
+        whole, fraction = match.group(1).replace(",", ""), match.group(2)
+    else:
+        raise ValueError(AMOUNT_HINT)
+    return parse_money_cents(f"{whole}.{fraction}")
+
+
 def canonical_rate(value: str) -> str:
     """Validate a percentage and retain its exact decimal representation."""
     rate = _decimal(value)
