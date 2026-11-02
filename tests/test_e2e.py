@@ -219,7 +219,7 @@ def store_server(tmp_path: Path) -> Iterator[Callable[[str], RunningStore]]:
 
 def _ask(page: Page, question: str) -> None:
     """Submit through the native chat input, including keyboard activation."""
-    entry = page.get_by_placeholder("Ask the store a question")
+    entry = page.get_by_placeholder("Digite sua mensagem para a loja")
     expect(entry).to_be_enabled(timeout=20_000)
     entry.fill(question)
     entry.press("Enter")
@@ -235,7 +235,7 @@ def test_chat_queries_real_data_and_refreshes_changed_sources(
     expect(page.get_by_text("Bluejay Acoustic Guitar costs R$ 123,45.", exact=True)).to_be_visible(
         timeout=20_000
     )
-    page.get_by_text("Sources consulted", exact=True).click()
+    page.get_by_text("Fontes consultadas", exact=True).click()
     expect(page.get_by_text("renamed-catalog.csv", exact=True)).to_be_visible()
     write_sources(server.data_dir, price="234.56")
     _ask(page, "Check the price again.")
@@ -267,7 +267,7 @@ def test_pdf_search_displays_citations(
     page.goto(server.url)
     _ask(page, question)
     expect(page.get_by_text(answer, exact=False)).to_be_visible(timeout=20_000)
-    page.get_by_text("Sources consulted", exact=True).click()
+    page.get_by_text("Fontes consultadas", exact=True).click()
     expect(page.get_by_text(source, exact=False).last).to_be_visible()
 
 
@@ -283,9 +283,13 @@ def test_new_chat_rotates_url_and_saved_url_resumes_history(
     )
     saved = page.url
     assert "conversation=" in saved
-    page.get_by_role("button", name="New chat", exact=True).click()
+    page.get_by_role("button", name="Nova conversa", exact=True).click()
     expect(page).not_to_have_url(saved)
-    expect(page.get_by_text("Hello! How can I help you find your next instrument?")).to_be_visible()
+    expect(
+        page.get_by_text(
+            "Oi! Sou o assistente virtual da Empório da Música. Qual é o seu nome? Em que posso te ajudar hoje?"
+        )
+    ).to_be_visible()
     assert page.url != saved
     expect(page.get_by_text("I will remember Bluejay Acoustic Guitar.", exact=True)).to_have_count(
         0
@@ -321,7 +325,7 @@ def test_browser_contexts_do_not_share_history_or_order_access(
         expect(second.get_by_text("PRIVATE-TRACK-A", exact=False)).to_have_count(0)
         assert second.url != page.url
         saved = page.url
-        page.get_by_role("button", name="New chat", exact=True).click()
+        page.get_by_role("button", name="Nova conversa", exact=True).click()
         expect(page).not_to_have_url(saved)
         _ask(page, "Show my order status.")
         expect(page.get_by_text("Please provide your order number and email.")).to_be_visible(
@@ -340,7 +344,7 @@ def test_browser_contexts_do_not_share_history_or_order_access(
 @pytest.mark.parametrize(
     ("scenario", "message"),
     [
-        ("missing-key", "Chat is not configured yet."),
+        ("missing-key", "O chat ainda não está configurado."),
         ("missing-voyage", "VOYAGE_API_KEY is required to index the supplied PDFs."),
         ("missing-sources", "The data directory contains no supported CSV or PDF files."),
     ],
@@ -352,8 +356,8 @@ def test_missing_configuration_or_sources_disables_chat(
     server = store_server(scenario)
     page.goto(server.url)
     expect(page.get_by_text(message, exact=False)).to_be_visible(timeout=20_000)
-    expect(page.get_by_placeholder("Ask the store a question")).to_be_disabled()
-    retry = page.get_by_role("button", name="Retry loading sources", exact=True)
+    expect(page.get_by_placeholder("Digite sua mensagem para a loja")).to_be_disabled()
+    retry = page.get_by_role("button", name="Tentar carregar novamente", exact=True)
     if scenario == "missing-key":
         expect(retry).to_have_count(0)
     else:
@@ -367,7 +371,7 @@ def test_request_failure_recovers_without_restarting_application(
     server = store_server("normal")
     page.goto(server.url)
     _ask(page, "Force a request failure.")
-    expect(page.get_by_text("The request could not be completed. Please try again.")).to_be_visible(
+    expect(page.get_by_text("Não foi possível responder agora. Tente novamente.")).to_be_visible(
         timeout=20_000
     )
     _ask(page, "What is the price of Bluejay Acoustic Guitar?")
@@ -392,12 +396,12 @@ def test_source_loading_retry_preserves_conversation_and_recovers_after_repair(
     expect(page.get_by_text("Invalid source 'invalid.csv'", exact=False)).to_be_visible(
         timeout=20_000
     )
-    expect(page.get_by_placeholder("Ask the store a question")).to_be_disabled()
+    expect(page.get_by_placeholder("Digite sua mensagem para a loja")).to_be_disabled()
     assert page.url == saved
 
     invalid.unlink()
-    page.get_by_role("button", name="Retry loading sources", exact=True).click()
-    expect(page.get_by_placeholder("Ask the store a question")).to_be_enabled(timeout=20_000)
+    page.get_by_role("button", name="Tentar carregar novamente", exact=True).click()
+    expect(page.get_by_placeholder("Digite sua mensagem para a loja")).to_be_enabled(timeout=20_000)
     expect(page.get_by_text(answer, exact=True)).to_be_visible(timeout=20_000)
     assert page.url == saved
     _ask(page, "Check the price again.")
