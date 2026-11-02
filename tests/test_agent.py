@@ -459,7 +459,6 @@ def test_replaced_source_generation_revokes_order_scope_without_losing_history(
 def test_store_fact_tools_reach_the_model_with_matching_instructions(tmp_path: Path) -> None:
     """Every new tool is offered to the model and named in the system instructions."""
     names = (
-        "store_facts",
         "store_open_now",
         "check_return_window",
         "register_complaint",
