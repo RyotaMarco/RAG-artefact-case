@@ -11,9 +11,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from agent_fixtures import manual_snapshot, small_snapshot
 
-from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
+from emporio_agent.access import ConversationAccess, conversation_token
 from emporio_agent.complaints import REDACTED, new_protocol, record_complaint
 from emporio_agent.runtime import Snapshot
+from emporio_agent.tools import StoreTools
 
 NOW = datetime(2026, 11, 2, 23, 30, tzinfo=ZoneInfo("America/Campo_Grande"))
 PROTOCOL = re.compile(r"REC-20261102-[A-HJ-NP-Z2-9]{6}")
