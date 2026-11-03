@@ -202,7 +202,7 @@ Each conversation has an unguessable token in the URL, so a customer can bookmar
 
 ### Interface
 
-Streamlit gives a usable chat with very little code, shows the sources consulted under each answer, and is easy to run in Docker. All customer-facing text is in Brazilian Portuguese. `$` is escaped before rendering, because Streamlit's markdown reads two `$` on one line as a formula and would break amounts such as "R$ 1.199,00 em 10x de R$ 119,90".
+Streamlit gives a usable chat with very little code, shows the sources consulted under each answer, and is easy to run in Docker. The sources are shown so that each answer can be checked against the manual and the data during evaluation; in a production application they would not be shown to the customer, only kept in the logs for the store's staff. All customer-facing text is in Brazilian Portuguese. `$` is escaped before rendering, because Streamlit's markdown reads two `$` on one line as a formula and would break amounts such as "R$ 1.199,00 em 10x de R$ 119,90".
 
 ---
 
