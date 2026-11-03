@@ -10,7 +10,7 @@ import pytest
 from agent_fixtures import small_snapshot
 from test_embeddings import VoyageStub, make_embedder
 
-from emporio_agent.agent import ConversationAccess, conversation_token
+from emporio_agent.access import ConversationAccess, conversation_token
 from emporio_agent.sql import QueryEngine
 
 

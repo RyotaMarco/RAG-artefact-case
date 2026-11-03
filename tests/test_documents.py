@@ -11,10 +11,11 @@ from agent_fixtures import small_snapshot
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
+from emporio_agent.access import ConversationAccess, conversation_token
 from emporio_agent.documents import ChunkConfig, build_index
 from emporio_agent.policies import extract_rules
 from emporio_agent.runtime import Snapshot
+from emporio_agent.tools import StoreTools
 
 
 @dataclass(frozen=True)

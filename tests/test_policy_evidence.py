@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from agent_fixtures import FixedEmbedder, manual_snapshot, small_snapshot
 
-from emporio_agent.agent import ConversationAccess, StoreTools, conversation_token
+from emporio_agent.access import ConversationAccess, conversation_token
 from emporio_agent.documents import PolicyIndex, PolicySection
 from emporio_agent.policy_evidence import MASK, RULE_EVIDENCE, PolicyEvidence
 from emporio_agent.runtime import Snapshot
@@ -20,6 +20,7 @@ from emporio_agent.store_rules import (
     opening_status,
     return_window,
 )
+from emporio_agent.tools import StoreTools
 
 # The manual's values as of this PDF; test_manual_values_match_the_delivered_pdf ties them.
 HOURS = {day: (time(9), time(18)) for day in range(5)} | {5: (time(9), time(13))}
